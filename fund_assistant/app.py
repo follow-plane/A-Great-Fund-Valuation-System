@@ -123,12 +123,30 @@ if page == "股票行情":
                 st.session_state['stock_code_to_analyze'] = selected_stock.to_dict()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🤖 AI 配置 (豆包)")
-ai_api_key = st.sidebar.text_input("API Key", type="password", help="从火山引擎申请的 API Key", value=st.session_state.get('ai_api_key', ''))
-ai_endpoint_id = st.sidebar.text_input("Endpoint ID", help="部署的推理终端 ID", value=st.session_state.get('ai_endpoint_id', ''))
+st.sidebar.subheader("🤖 AI 配置 (DeepSeek)")
 
-if ai_api_key: st.session_state['ai_api_key'] = ai_api_key
-if ai_endpoint_id: st.session_state['ai_endpoint_id'] = ai_endpoint_id
+# Load persisted settings
+if 'ai_api_key' not in st.session_state:
+    st.session_state['ai_api_key'] = database.get_setting('ai_api_key', '')
+if 'ai_endpoint_id' not in st.session_state:
+    st.session_state['ai_endpoint_id'] = database.get_setting('ai_endpoint_id', 'deepseek-chat')
+
+ai_api_key = st.sidebar.text_input("DeepSeek API Key", type="password", help="请输入 DeepSeek API Key", value=st.session_state['ai_api_key'])
+if ai_api_key:
+    ai_api_key = ai_api_key.strip() # Auto-remove whitespace
+# Default model to deepseek-chat if not set
+default_model = st.session_state.get('ai_endpoint_id', 'deepseek-chat')
+ai_endpoint_id = st.sidebar.text_input("Model Name", help="例如: deepseek-chat 或 deepseek-reasoner", value=default_model)
+if ai_endpoint_id:
+    ai_endpoint_id = ai_endpoint_id.strip() # Auto-remove whitespace
+
+if ai_api_key != st.session_state.get('ai_api_key'):
+    st.session_state['ai_api_key'] = ai_api_key
+    database.save_setting('ai_api_key', ai_api_key)
+    
+if ai_endpoint_id != st.session_state.get('ai_endpoint_id'):
+    st.session_state['ai_endpoint_id'] = ai_endpoint_id
+    database.save_setting('ai_endpoint_id', ai_endpoint_id)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚡ 数据同步")
@@ -291,25 +309,58 @@ def show_dashboard_metrics():
             
     # 3. Market News & Tips
     st.markdown("### � 市场动态 & 智能建议")
-    c_news, c_tips = st.columns([2, 1])
+    c_news, c_tips = st.columns([1.8, 1.2])
     
     with c_news:
-        st.subheader("今日财经头条 (财联社)")
-        news_list = data_api.get_financial_news()
-        if news_list:
-            for item in news_list[:5]: # Show top 5 on dashboard
-                st.markdown(f"• **[{item['tag']}]** [{item['title']}]({item['url']}) <span style='color: gray; font-size: 0.8em;'>({item['time']})</span>", unsafe_allow_html=True)
-        else:
-            st.caption("暂无实时新闻。")
+        with st.container(border=True):
+            st.subheader("📰 今日财经头条")
+            news_list = data_api.get_financial_news()
+            if news_list:
+                for item in news_list[:6]: # Show top 6
+                    st.markdown(f"• **[{item['tag']}]** [{item['title']}]({item['url']})")
+                    st.caption(f"&nbsp;&nbsp;&nbsp;🕒 {item['time']}")
+            else:
+                st.caption("暂无实时新闻。")
             
     with c_tips:
-        st.subheader("持仓建议")
-        if not holdings.empty:
-            tips = logic.optimize_holdings(holdings)
-            for tip in tips:
-                st.warning(f"⚠️ {tip}")
-        else:
-            st.success("👋 欢迎！请添加持仓开始分析。")
+        with st.container(border=True):
+            st.subheader("💡 持仓优化建议")
+            if not holdings.empty:
+                # Local Tips
+                tips = logic.optimize_holdings(holdings)
+                if tips:
+                    for i, tip in enumerate(tips):
+                        st.info(f"**建议 {i+1}**: {tip}", icon="⚠️")
+                else:
+                    st.success("🎉 您的持仓配置目前非常健康！", icon="✅")
+                
+                st.divider()
+                st.markdown("**深度诊断工具**")
+                
+                # Action Buttons
+                if st.button("🧠 AI 持仓全科诊断 (DeepSeek)", use_container_width=True):
+                    if not st.session_state.get('ai_api_key'):
+                        st.error("请先在左侧配置 DeepSeek API Key")
+                    else:
+                        with st.spinner("DeepSeek AI 正在深度扫描您的持仓组合..."):
+                            holdings_list = holdings[['fund_code', 'fund_name', 'share', 'cost_price']].to_dict('records')
+                            report = logic.analyze_portfolio_with_ai(
+                                holdings_list,
+                                st.session_state['ai_api_key'], 
+                                st.session_state.get('ai_endpoint_id', 'deepseek-chat')
+                            )
+                            st.markdown("### 📋 AI 深度诊断报告")
+                            with st.container(height=400):
+                                st.markdown(report)
+                
+                if st.button("📊 本地量化诊断 (免费)", use_container_width=True):
+                    with st.spinner("正在进行本地量化分析..."):
+                        report = logic.analyze_portfolio_locally(holdings)
+                        st.markdown("### 📊 本地量化报告")
+                        st.info(report)
+                        
+            else:
+                st.info("👋 添加持仓后，此处将显示专属投资建议。")
 
 def render_dashboard():
     st.title("📊 投资仪表盘")
@@ -391,20 +442,60 @@ def render_search():
                 c1, c2 = st.columns([1, 2])
                 with c1:
                     st.subheader(f"{info['name']} ({info['code']})")
-                    st.write(f"**类型**: {info['type']}")
-                    st.write(f"**经理**: {info['manager']}")
-                    st.write(f"**成立**: {info['start_date']}")
+                    
+                    # Basic Profile in Metrics Style
+                    st.caption("基本档案")
+                    p1, p2 = st.columns(2)
+                    p1.markdown(f"**类型**: {info['type']}")
+                    p1.markdown(f"**规模**: {info['scale']}")
+                    p2.markdown(f"**经理**: {info['manager']}")
+                    p2.markdown(f"**成立**: {info['start_date']}")
+                    
+                    st.divider()
+                    st.markdown(f"**管理人**: {info['company']}")
+                    st.markdown(f"**评级**: {info['rating']}")
                     
                     # Realtime
+                    st.divider()
                     est = data_api.get_real_time_estimate(fund_code)
                     st.metric("实时估值", f"{est['gz']}", f"{est['zzl']}%", delta_color="inverse")
                     
+                    # Fund Profile (Collapsible)
+                    with st.expander("📚 基金概况 (投资目标/策略)"):
+                        st.markdown("**投资目标**")
+                        st.info(info['goal'])
+                        st.markdown("**投资策略**")
+                        st.caption(info['strategy'])
+                        st.markdown("**业绩比较基准**")
+                        st.text(info['benchmark'])
+                    
                     # Action
                     with st.expander("➕ 添加到持仓"):
+                        # Effective Date Logic
+                        eff_date = logic.get_effective_trading_date()
+                        st.caption(f"📅 交易归属日期: **{eff_date}** (根据 15:00 交易规则)")
+                        
+                        add_mode = st.radio("录入模式", ["按份额录入 (已知持仓)", "按金额买入 (今日申购)"], horizontal=True)
+                        
                         with st.form("add_holding_form"):
-                            share = st.number_input("持有份额", min_value=0.0, step=0.01, format="%.2f", key="add_share")
-                            # Use format="%.4f" to enforce 4 decimal places display and input precision
-                            cost = st.number_input("持仓成本 (元)", min_value=0.0, step=0.0001, format="%.4f", key="add_cost")
+                            if "金额" in add_mode:
+                                amount = st.number_input("买入金额 (元)", min_value=0.0, step=100.0, format="%.2f", key="add_amount")
+                                
+                                # Estimate Logic
+                                est_p = float(est['gz']) if est and est.get('gz') and est['gz'] > 0 else 1.0
+                                est_share = amount / est_p if est_p > 0 else 0
+                                
+                                st.markdown(f"📏 预估确认份额: **{est_share:.2f}** (基于净值 {est_p:.4f})")
+                                st.caption("⚠️ 注意: 实际份额将根据最终确认净值计算，建议成交后手动修正。")
+                                
+                                # Hidden fields logic workaround: Set cost and share for submission
+                                cost = est_p
+                                share = est_share
+                            else:
+                                share = st.number_input("持有份额", min_value=0.0, step=0.01, format="%.2f", key="add_share")
+                                # Use format="%.4f" to enforce 4 decimal places display and input precision
+                                cost = st.number_input("持仓成本 (元)", min_value=0.0, step=0.0001, format="%.4f", key="add_cost")
+                            
                             submit_holding = st.form_submit_button("确认添加")
                             
                             if submit_holding:
@@ -417,10 +508,10 @@ def render_search():
                                         del st.session_state['last_dashboard_data']
                                     
                                     # Set success message for next run
-                                    st.session_state['add_success_msg'] = f"成功添加 {info['name']} ({share}份) 到持仓！"
+                                    st.session_state['add_success_msg'] = f"成功添加 {info['name']} ({share:.2f}份) 到持仓！"
                                     st.rerun()
                                 else:
-                                    st.error("请输入有效的份额")
+                                    st.error("请输入有效的份额/金额")
 
                 with c2:
                     # Diagnosis
@@ -436,7 +527,7 @@ def render_search():
                     st.markdown("---")
                     st.subheader("🔍 深度诊断报告")
                     
-                    diag_mode = st.radio("选择诊断模式", ["本地专家诊断 (免费)", "AI 深度分析 (豆包)"], horizontal=True)
+                    diag_mode = st.radio("选择诊断模式", ["本地专家诊断 (免费)", "AI 深度分析 (DeepSeek)"], horizontal=True)
                     
                     if diag_mode == "本地专家诊断 (免费)":
                         if st.button("🚀 生成本地深度分析", use_container_width=True):
@@ -445,14 +536,14 @@ def render_search():
                                 st.markdown(local_report)
                     else:
                         if st.button("🚀 开始 AI 深度分析", use_container_width=True):
-                            if not st.session_state.get('ai_api_key') or not st.session_state.get('ai_endpoint_id'):
-                                st.error("请先在左侧边栏配置 AI API Key 和 Endpoint ID")
+                            if not st.session_state.get('ai_api_key'):
+                                st.error("请先在左侧边栏配置 DeepSeek API Key")
                             else:
-                                with st.spinner("豆包正在分析中，请稍候..."):
+                                with st.spinner("DeepSeek 正在分析中，请稍候..."):
                                     ai_analysis = logic.analyze_fund_with_ai(
                                         fund_code, 
                                         st.session_state['ai_api_key'], 
-                                        st.session_state['ai_endpoint_id'],
+                                        st.session_state.get('ai_endpoint_id', 'deepseek-chat'),
                                         fund_name=info['name']
                                     )
                                     st.markdown(ai_analysis)

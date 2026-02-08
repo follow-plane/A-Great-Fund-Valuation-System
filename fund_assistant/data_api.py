@@ -455,30 +455,62 @@ def get_financial_news():
     """
     return _fetch_financial_news()
 
+@st.cache_data(ttl=3600*24)
+def _fetch_fund_details_xq(fund_code):
+    """
+    Fetch detailed fund info (Manager, Start Date) from XueQiu.
+    """
+    try:
+        df = ak.fund_individual_basic_info_xq(symbol=fund_code)
+        if not df.empty:
+            return df.set_index('item')['value'].to_dict()
+    except Exception as e:
+        print(f"Error fetching fund details XQ for {fund_code}: {e}")
+    return {}
+
 def get_fund_base_info(fund_code):
     """
-    Fetch basic fund information using cached full list.
+    Fetch basic fund information using cached full list + detailed info.
     """
+    # 1. Basic Info from cached list
     fund_name_df = _fetch_all_fund_names()
+    
+    info = {
+         'code': fund_code,
+         'name': '未知基金',
+         'type': '--',
+         'manager': '--', 
+         'start_date': '--',
+     }
     
     if not fund_name_df.empty:
         fund_match = fund_name_df[fund_name_df['基金代码'] == fund_code]
         if not fund_match.empty:
-            return {
-                 'code': fund_code,
-                 'name': fund_match['基金简称'].iloc[0],
-                 'type': fund_match['基金类型'].iloc[0],
-                 'manager': '查看详情', 
-                 'start_date': '--',
-             }
-    
-    return {
-        'code': fund_code,
-        'name': '数据获取失败',
-        'type': '--',
-        'manager': '--',
-        'start_date': '--'
-    }
+            info['name'] = fund_match['基金简称'].iloc[0]
+            info['type'] = fund_match['基金类型'].iloc[0]
+
+    # 2. Detailed Info from Real API (XueQiu)
+    details = _fetch_fund_details_xq(fund_code)
+    if details:
+        info['manager'] = details.get('基金经理', info['manager'])
+        info['start_date'] = details.get('成立时间', info['start_date'])
+        
+        # Additional Fields
+        info['full_name'] = details.get('基金全称', '--')
+        info['scale'] = details.get('最新规模', '--')
+        info['company'] = details.get('基金公司', '--')
+        info['rating'] = details.get('基金评级', '--')
+        info['strategy'] = details.get('投资策略', '暂无描述')
+        info['goal'] = details.get('投资目标', '暂无描述')
+        info['benchmark'] = details.get('业绩比较基准', '--')
+        
+        # Fallback for name/type if missing in basic list
+        if info['name'] == '未知基金' and '基金简称' in details:
+             info['name'] = details['基金简称']
+        if info['type'] == '--' and '基金类型' in details:
+             info['type'] = details['基金类型']
+             
+    return info
 
 def search_funds(keyword):
     """

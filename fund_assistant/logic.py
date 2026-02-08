@@ -2,23 +2,40 @@ import pandas as pd
 import numpy as np
 import datetime
 from data_api import get_fund_nav_history
-import openai
 
 def analyze_fund_with_ai(fund_code, api_key, endpoint_id, fund_name=""):
     """
-    Use Doubao (Volcengine Ark) AI to perform deep fund analysis.
+    Use DeepSeek AI to perform deep fund analysis.
     """
-    if not api_key or not endpoint_id:
-        return "请先在侧边栏配置 Doubao AI 的 API Key 和 Endpoint ID。"
+    try:
+        import openai
+    except ImportError as e:
+        return f"导入 openai 库失败: {str(e)}。请检查环境配置。"
+    except Exception as e:
+        return f"发生未知错误: {str(e)}"
+
+    if not api_key:
+        return "请先在侧边栏配置 DeepSeek API Key。"
+
+    # Check for non-ASCII characters in API Key and Model ID to prevent encoding errors
+    try:
+        api_key.encode('ascii')
+    except UnicodeEncodeError:
+        return "API Key 包含非法字符（可能是中文或全角符号），请切换到英文输入法重新输入。"
+        
+    try:
+        endpoint_id.encode('ascii')
+    except UnicodeEncodeError:
+        return "模型名称 (Model Name) 包含非法字符，请使用纯英文（如 deepseek-chat）。"
 
     try:
         # 1. Prepare Data for AI
         diagnosis = diagnose_fund(fund_code)
         
-        # 2. Setup OpenAI Client (Doubao is OpenAI compatible)
+        # 2. Setup OpenAI Client (Compatible with DeepSeek)
         client = openai.OpenAI(
             api_key=api_key,
-            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            base_url="https://api.deepseek.com",
         )
 
         # 3. Construct Prompt
@@ -41,7 +58,7 @@ def analyze_fund_with_ai(fund_code, api_key, endpoint_id, fund_name=""):
 3. **投资建议**：根据当前数据，给出具体的持有、减仓或建仓建议，并说明理由。
 4. **适合人群**：该基金适合哪种风险偏好的投资者。
 
-要求：回复必须专业、客观、严谨，使用金融术语，总字数控制在500字左右。
+要求：回复必须专业、客观、严谨，使用金融术语，总字数控制在700字左右。
 """
 
         # 4. Call API
@@ -57,6 +74,241 @@ def analyze_fund_with_ai(fund_code, api_key, endpoint_id, fund_name=""):
 
     except Exception as e:
         return f"AI 分析失败: {str(e)}"
+
+def analyze_portfolio_with_ai(holdings, api_key, endpoint_id):
+    """
+    Use DeepSeek AI to perform portfolio diagnosis.
+    holdings: List of dicts [{'fund_code':..., 'fund_name':..., 'share':..., 'cost_price':...}, ...]
+    """
+    try:
+        import openai
+    except ImportError as e:
+        return f"导入 openai 库失败: {str(e)}。请检查环境配置。"
+    except Exception as e:
+        return f"发生未知错误: {str(e)}"
+
+    if not api_key:
+        return "请先在侧边栏配置 DeepSeek API Key。"
+
+    # Check for non-ASCII characters
+    try:
+        api_key.encode('ascii')
+    except UnicodeEncodeError:
+        return "API Key 包含非法字符（可能是中文或全角符号），请切换到英文输入法重新输入。"
+        
+    try:
+        endpoint_id.encode('ascii')
+    except UnicodeEncodeError:
+        return "模型名称 (Model Name) 包含非法字符，请使用纯英文（如 deepseek-chat）。"
+
+    if not holdings or len(holdings) == 0:
+        return "当前持仓为空，无法进行分析。"
+
+    try:
+        # 1. Prepare Portfolio Data for Prompt
+        portfolio_desc = ""
+        total_market_val = 0.0
+        
+        # Calculate approximate total value to show weights (using cost as proxy if current price not avail here easily, 
+        # but better to let AI analyze composition). 
+        # For simplicity, we list the items.
+        
+        for idx, h in enumerate(holdings):
+            # We assume the caller might pass current price or we use cost. 
+            # Ideally we want current value, but let's stick to what we have in the dict.
+            # If the dict has 'market_value', use it.
+            mv = h.get('market_value', h['share'] * h['cost_price']) 
+            total_market_val += mv
+            
+            portfolio_desc += f"{idx+1}. {h['fund_name']} ({h['fund_code']}): 持有 {h['share']:.2f}份，成本 {h['cost_price']:.4f}\n"
+
+        # 2. Setup OpenAI Client
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com",
+        )
+
+        # 3. Construct Prompt
+        prompt = f"""
+你是一位专业的基金投资顾问。请根据以下用户的持仓列表进行整体投资组合诊断和建议。
+
+【当前持仓组合】
+{portfolio_desc}
+(注：以上仅列出持仓份额与成本，请基于你对这些基金（通过代码/名称识别）的了解进行分析)
+
+请从以下维度进行深度分析：
+1. **组合配置均衡性**：分析当前持仓在行业、风格（成长/价值）、资产类别（股票/债券）上的分布是否合理。是否存在持仓过于集中的风险？
+2. **潜在风险提示**：指出组合中风险较高的部分，或近期市场环境下可能面临的挑战。
+3. **调仓建议**：
+   - 哪些基金建议继续持有？
+   - 哪些建议考虑减仓或替换？
+   - 是否需要补充某一类别的资产以平衡风险？
+4. **总结**：给出一段简短的整体评价。
+
+要求：
+- 语言通俗易懂，但逻辑必须专业严谨。
+- 如果某个基金你不熟悉，请根据其名称中的关键词（如“医药”、“新能源”、“债”）进行推断分析。
+- 总字数控制在700字左右。
+"""
+
+        # 4. Call API
+        completion = client.chat.completions.create(
+            model=endpoint_id,
+            messages=[
+                {"role": "system", "content": "你是一位专业的投资组合管理专家。"},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        return completion.choices[0].message.content
+
+    except Exception as e:
+        return f"AI 组合分析失败: {str(e)}"
+
+def analyze_portfolio_locally(holdings_list):
+    """
+    Perform portfolio analysis using local quantitative rules.
+    No API Key required.
+    
+    holdings_list: list of dicts with keys ['fund_code', 'fund_name', 'share', 'cost_price']
+    Note: Requires current price data which should be fetched before calling or inside.
+    Ideally, we pass a dataframe that already has 'market_value' or 'current_price'.
+    But here we receive the basic list. We might need to fetch real-time price if not provided.
+    However, usually the calling function (app.py) has access to the full dataframe with current prices.
+    Let's assume the input list has 'market_value' and 'day_profit' if possible, or we calculate it.
+    
+    Actually, let's accept the DataFrame directly for easier processing.
+    """
+    import pandas as pd
+    import data_api
+    
+    if isinstance(holdings_list, list):
+        if not holdings_list:
+            return "持仓为空，无法分析。"
+        df = pd.DataFrame(holdings_list)
+    else:
+        # Assume it is a DataFrame
+        if holdings_list.empty:
+            return "持仓为空，无法分析。"
+        df = holdings_list.copy()
+        
+    # We need current market value for weighting. 
+    # If not present, we fetch latest estimates.
+    if 'market_value' not in df.columns:
+        # Fetch current prices
+        current_values = []
+        for _, row in df.iterrows():
+            est = data_api.get_real_time_estimate(row['fund_code'])
+            price = float(est['gz']) if est and est.get('gz') else row['cost_price']
+            val = price * row['share']
+            current_values.append(val)
+        df['market_value'] = current_values
+        
+    total_assets = df['market_value'].sum()
+    if total_assets == 0:
+        return "总资产为0，无法分析。"
+        
+    df['weight'] = df['market_value'] / total_assets
+    df['profit_rate'] = (df['market_value'] - (df['cost_price'] * df['share'])) / (df['cost_price'] * df['share'])
+    
+    # 1. Concentration Analysis
+    top1_fund = df.sort_values('weight', ascending=False).iloc[0]
+    top3_funds = df.sort_values('weight', ascending=False).head(3)
+    top3_weight = top3_funds['weight'].sum()
+    
+    conc_text = ""
+    if top3_weight > 0.8:
+        conc_text = f"🚨 **高度集中风险**：前三大持仓占比高达 {top3_weight*100:.1f}%，组合过于集中。一旦核心持仓遭遇回调，整体净值将大幅波动。建议适当分散配置。"
+    elif top3_weight > 0.5:
+        conc_text = f"⚠️ **中度集中**：前三大持仓占比 {top3_weight*100:.1f}%，集中度适中。既保证了核心进攻性，又有一定的分散效果。"
+    else:
+        conc_text = f"✅ **持仓分散**：前三大持仓占比仅 {top3_weight*100:.1f}%，资金分布较为均匀，能够有效平滑单只基金的波动风险。"
+        
+    # 2. Diversification (Fund Count)
+    fund_count = len(df)
+    div_text = ""
+    if fund_count < 3:
+        div_text = "持仓数量较少（不足3只），可能导致风险无法有效分散。建议适当增加不同风格或资产类别的基金。"
+    elif fund_count > 15:
+        div_text = "持仓数量过多（超过15只），可能导致管理精力分散且收益被平均化（“类指数化”）。建议精简持仓，去弱留强。"
+    else:
+        div_text = f"持仓数量适中（{fund_count}只），便于管理和跟踪。"
+        
+    # 3. Sector/Style Inference (Heuristic)
+    keywords = {
+        "债": "债券/固收",
+        "医": "医药健康",
+        "药": "医药健康",
+        "能": "新能源/周期",
+        "光伏": "新能源/周期",
+        "酒": "消费/白酒",
+        "消费": "消费/白酒",
+        "科": "科技/TMT",
+        "芯": "科技/TMT",
+        "半导体": "科技/TMT",
+        "指": "指数/宽基",
+        "300": "指数/宽基",
+        "500": "指数/宽基",
+        "纳斯达克": "海外/QDII",
+        "标普": "海外/QDII"
+    }
+    
+    sector_weights = {}
+    for _, row in df.iterrows():
+        name = row['fund_name']
+        found = False
+        for kw, sector in keywords.items():
+            if kw in name:
+                sector_weights[sector] = sector_weights.get(sector, 0) + row['weight']
+                found = True
+                # Don't break, a name could match multiple (rarely), but let's count first match priority or just first
+                break 
+        if not found:
+            sector_weights["其他/混合"] = sector_weights.get("其他/混合", 0) + row['weight']
+            
+    # Find dominant sector
+    sorted_sectors = sorted(sector_weights.items(), key=lambda x: x[1], reverse=True)
+    dominant_sector = sorted_sectors[0]
+    
+    style_text = ""
+    if dominant_sector[1] > 0.4 and dominant_sector[0] != "其他/混合":
+        style_text = f"🔍 **行业风格明显**：您的持仓在 **{dominant_sector[0]}** 板块暴露较高（占比 {dominant_sector[1]*100:.1f}%）。请警惕行业周期性波动风险。"
+    elif "其他/混合" in [s[0] for s in sorted_sectors[:2]] and sorted_sectors[0][1] < 0.3:
+        style_text = "⚖️ **风格均衡**：持仓分布较为广泛，未发现明显的单一行业过度押注，资产配置较为健康。"
+    else:
+        style_text = "📊 **行业分布**：" + "、".join([f"{s[0]}({s[1]*100:.0f}%)" for s in sorted_sectors[:3]])
+        
+    # 4. Profit Analysis
+    profitable_count = len(df[df['profit_rate'] > 0])
+    win_rate = profitable_count / fund_count
+    
+    perf_text = ""
+    if win_rate > 0.7:
+        perf_text = f"🏆 **胜率极高**：{win_rate*100:.0f}% 的持仓处于盈利状态，说明您的选基眼光或入场时机非常精准。"
+    elif win_rate < 0.3:
+        perf_text = f"📉 **短期承压**：仅 {win_rate*100:.0f}% 的持仓盈利。建议检查是否买入在高点，或近期市场整体低迷。不要盲目割肉，应审视基本面。"
+    else:
+        perf_text = f"📊 **盈亏参半**：{profitable_count}只盈利，{fund_count-profitable_count}只亏损。这是投资常态，建议定期对亏损严重的基金进行诊断。"
+
+    report = f"""
+### 📊 本地量化诊断报告 (无需API)
+
+**1. 组合集中度分析**
+{conc_text}
+
+**2. 持仓数量与管理**
+{div_text}
+
+**3. 风格与行业配置**
+{style_text}
+
+**4. 盈亏面分析**
+{perf_text}
+
+---
+*注：本报告基于本地数学模型与关键词规则生成，仅供参考，不构成投资建议。*
+"""
+    return report
 
 def analyze_fund_locally(fund_code, fund_name=""):
     """

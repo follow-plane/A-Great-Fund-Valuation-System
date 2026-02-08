@@ -104,7 +104,7 @@ if 'data_prefetched' not in st.session_state:
         st.session_state['data_prefetched'] = True
 
 # --- Sidebar Navigation ---
-st.sidebar.title("🚀 基金估值")
+st.sidebar.title("🚀 基金估值系统")
 if 'main_nav' not in st.session_state:
     st.session_state['main_nav'] = "仪表盘"
 
@@ -127,6 +127,10 @@ if page == "股票行情":
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 AI 配置 (DeepSeek)")
+st.sidebar.markdown(
+    '<a href="https://platform.deepseek.com/api_keys" target="_blank" style="text-decoration: none; color: #fff; font-size: 0.8rem;">👉 点击前往 DeepSeek 官网获取 API Key</a>',
+    unsafe_allow_html=True
+)
 
 # Load persisted settings
 if 'ai_api_key' not in st.session_state:
@@ -159,14 +163,14 @@ if st.sidebar.button("🔄 立即刷新数据"):
     st.rerun()
 
 # Auto Refresh Toggle
-auto_refresh = st.sidebar.checkbox("开启自动刷新 (每1秒)")
+auto_refresh = st.sidebar.checkbox("开启实时刷新 (1秒级)")
 
 # Last update time
 st.sidebar.caption(f"上次更新: {datetime.datetime.now().strftime('%H:%M:%S')}")
 
 st.sidebar.markdown("---")
 st.sidebar.success("✅ **数据真实性核验**")
-st.sidebar.caption("• 实时估值: 东方财富 (EastMoney)\n• 历史净值: 天天基金 (1234567.com.cn)\n• 财经资讯: 财联社 (CLS)\n• 计算引擎: 本地实时核算")
+st.sidebar.caption("• 实时估值: 东方财富 (EastMoney)\n• 历史净值: 天天基金 (1234567.com.cn)\n• 财经资讯: 东方财富 (EastMoney)\n• 计算引擎: 本地实时核算")
 st.sidebar.info("⚠️ 系统严禁任何模拟、随机或虚假数据。所有指标均基于公开金融网络数据实时获取。")
 
 st.sidebar.markdown("---")
@@ -337,7 +341,21 @@ def show_dashboard_metrics():
         if not holdings.empty:
             # Calculate REAL historical trend of the current portfolio
             holdings_list = holdings[['fund_code', 'share']].to_dict('records')
-            history_series = data_api.get_portfolio_history(holdings_list, days=30)
+            
+            # Determine time range based on earliest purchase date
+            days_to_show = 30 # Default
+            try:
+                if 'purchase_date' in holdings.columns:
+                    valid_dates = pd.to_datetime(holdings['purchase_date'], errors='coerce').dropna()
+                    if not valid_dates.empty:
+                        earliest_date = valid_dates.min()
+                        days_since = (datetime.datetime.now() - earliest_date).days
+                        # Ensure we show at least 1 day, and add a small buffer to ensure the start date is included
+                        days_to_show = max(days_since, 1)
+            except Exception as e:
+                print(f"Error calculating days since inception: {e}")
+
+            history_series = data_api.get_portfolio_history(holdings_list, days=days_to_show)
             
             if not history_series.empty:
                 # Add current real-time value as the last point if today is not in history (history is usually T-1)
@@ -365,7 +383,7 @@ def show_dashboard_metrics():
                 ))
                 
                 fig.update_layout(
-                    title="近30天资产走势 (基于当前持仓回测)",
+                    title=f"自建仓以来资产走势 (近 {days_to_show} 天)",
                     template='plotly_dark',
                     xaxis_title='日期',
                     yaxis_title='总资产 (元)',
@@ -406,7 +424,7 @@ def show_dashboard_metrics():
                 tips = logic.optimize_holdings(holdings)
                 if tips:
                     for i, tip in enumerate(tips):
-                        st.info(f"**建议 {i+1}**: {tip}", icon="⚠️")
+                        st.info(f"{tip}", icon="⚠️")
                 else:
                     st.success("🎉 您的持仓配置目前非常健康！", icon="✅")
                 
@@ -474,13 +492,45 @@ def render_search():
         st.success(st.session_state['add_success_msg'])
         del st.session_state['add_success_msg']
     
-    query_input = st.text_input("输入基金代码或名称", max_chars=20)
+    # Initialize search_query if needed
+    if 'search_query' not in st.session_state:
+        st.session_state['search_query'] = ''
+
+    query_input = st.text_input("输入基金代码或名称", value=st.session_state['search_query'], max_chars=20)
     
-    if st.button("搜索 / 诊断"):
-        st.session_state['search_query'] = query_input
-        # Clear previous selection when a new search is performed
-        if 'selected_fund_code' in st.session_state:
-            del st.session_state['selected_fund_code']
+    # --- Search History ---
+    history = database.get_search_history()
+    if history:
+        st.caption("🕒 最近搜索 (点击快速搜索):")
+        # Display history items in rows of 5
+        for i in range(0, len(history), 5):
+            cols = st.columns(5)
+            chunk = history[i:i+5]
+            for idx, item in enumerate(chunk):
+                # Use a unique key for each button
+                if cols[idx].button(item, key=f"hist_btn_{item}_{i}_{idx}", use_container_width=True):
+                    st.session_state['search_query'] = item
+                    # Update timestamp in history
+                    database.add_search_history(item)
+                    # Clear selection to force new search view
+                    if 'selected_fund_code' in st.session_state:
+                        del st.session_state['selected_fund_code']
+                    st.rerun()
+        
+        # Small clear button
+        if st.button("🗑️ 清空记录", key="clear_hist_btn", type="secondary"):
+            database.clear_search_history()
+            st.rerun()
+
+    if st.button("搜索 / 诊断", type="primary"):
+        if query_input:
+            st.session_state['search_query'] = query_input
+            database.add_search_history(query_input)
+            
+            # Clear previous selection when a new search is performed
+            if 'selected_fund_code' in st.session_state:
+                del st.session_state['selected_fund_code']
+            st.rerun()
     
     query = st.session_state.get('search_query', '')
     
@@ -1054,15 +1104,24 @@ def render_holdings():
                 
             # If we have data (either fresh or from session state), render it
             if display_df is not None:
+                # Create a view for display with Chinese headers
+                df_to_show = display_df.rename(columns={
+                    'fund_code': '基金代码',
+                    'fund_name': '基金名称',
+                    'share': '持有份额',
+                    'cost_price': '持仓成本'
+                })
+
                 # Ensure cost_price is displayed with 4 decimals in the dataframe
                 st.dataframe(
-                    display_df[['fund_code', 'fund_name', 'share', 'cost_price', '最新净值', '当日涨幅%', '当日收益', '累计盈亏', '当前市值', '数据日期']].style.format({
-                        'cost_price': '{:.4f}',
+                    df_to_show[['基金代码', '基金名称', '持有份额', '持仓成本', '最新净值', '当日涨幅%', '当日收益', '累计盈亏', '当前市值', '数据日期']].style.format({
+                        '持仓成本': '{:.4f}',
                         '最新净值': '{:.4f}',
                         '当前市值': '{:.2f}',
                         '累计盈亏': '{:.2f}',
                         '当日收益': '{:.2f}',
-                        '当日涨幅%': '{:.2f}%'
+                        '当日涨幅%': '{:.2f}%',
+                        '持有份额': '{:.2f}'
                     }),
                     use_container_width=True
                 )

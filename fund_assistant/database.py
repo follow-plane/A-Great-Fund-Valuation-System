@@ -83,6 +83,14 @@ def init_db():
         )
     ''')
     
+    # Search History table: Stores recent search keywords
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS search_history (
+            keyword TEXT PRIMARY KEY,
+            timestamp TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -235,6 +243,49 @@ def update_plan_status(plan_id, status):
     conn = get_connection()
     c = conn.cursor()
     c.execute('UPDATE investment_plans SET status = ? WHERE id = ?', (status, plan_id))
+    conn.commit()
+    conn.close()
+
+# --- Search History Operations ---
+def add_search_history(keyword):
+    """Add a search keyword to history. Keeps only top 10."""
+    if not keyword:
+        return
+    conn = get_connection()
+    c = conn.cursor()
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Insert or Replace to update timestamp if exists
+    c.execute('INSERT OR REPLACE INTO search_history (keyword, timestamp) VALUES (?, ?)', (keyword, ts))
+    
+    # Check count and delete old entries if > 10
+    c.execute("SELECT count(*) FROM search_history")
+    count = c.fetchone()[0]
+    
+    if count > 10:
+        c.execute('''
+            DELETE FROM search_history 
+            WHERE keyword NOT IN (
+                SELECT keyword FROM search_history ORDER BY timestamp DESC LIMIT 10
+            )
+        ''')
+        
+    conn.commit()
+    conn.close()
+
+def get_search_history():
+    """Get top 10 recent search keywords."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT keyword FROM search_history ORDER BY timestamp DESC LIMIT 10")
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def clear_search_history():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM search_history")
     conn.commit()
     conn.close()
 

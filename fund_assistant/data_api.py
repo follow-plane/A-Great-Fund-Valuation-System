@@ -542,6 +542,12 @@ def get_fund_base_info(fund_code):
          'type': '--',
          'manager': '--', 
          'start_date': '--',
+         'scale': '--',
+         'company': '--',
+         'rating': '--',
+         'strategy': '暂无描述',
+         'goal': '暂无描述',
+         'benchmark': '--'
      }
     
     if not fund_name_df.empty:

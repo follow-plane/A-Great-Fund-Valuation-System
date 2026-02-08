@@ -310,6 +310,149 @@ def analyze_portfolio_locally(holdings_list):
 """
     return report
 
+def optimize_holdings(holdings_df):
+    """
+    Generate short tips for dashboard.
+    """
+    tips = []
+    if holdings_df.empty: return tips
+    
+    # Check max drawdown risk (using a proxy if no historical data)
+    # Here we check profit rate
+    deep_loss = holdings_df[holdings_df['profit_rate'] < -0.15]
+    if not deep_loss.empty:
+        names = deep_loss['fund_name'].tolist()
+        tips.append(f"亏损预警：{', '.join(names[:2])} 等 {len(names)} 只基金亏损超过15%，建议进行深度诊断决定去留。")
+        
+    # Check concentration
+    if len(holdings_df) > 0:
+        total = holdings_df['market_value'].sum()
+        if total > 0:
+            weights = holdings_df['market_value'] / total
+            if weights.max() > 0.4:
+                top_name = holdings_df.loc[weights.idxmax(), 'fund_name']
+                tips.append(f"重仓提示：单一基金 {top_name} 占比超过40%，建议适当分散。")
+                
+    # Check count
+    if len(holdings_df) > 10:
+        tips.append(f"持仓过杂：当前持有 {len(holdings_df)} 只基金，建议精简至 5-8 只优质核心基金。")
+        
+    return tips
+
+def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execution_day=None):
+    """
+    Simulate SIP (定投) returns based on historical data.
+    
+    Args:
+        fund_code: Fund code
+        amount: Investment amount per period
+        frequency: '每周' or '每月'
+        duration_years: How many years to look back
+        execution_day: '1'-'5' for Week (Mon-Fri), '1'-'28' for Month
+    """
+    # Get history
+    df = get_fund_nav_history(fund_code)
+    if df.empty:
+        return None
+        
+    # Filter for duration
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=365*duration_years)).strftime("%Y-%m-%d")
+    
+    # Standardize columns if necessary
+    if '净值日期' in df.columns:
+        df = df.rename(columns={'净值日期': '日期'})
+        
+    df = df[df['日期'] >= start_date].sort_values('日期') # Ascending
+    
+    # Convert execution_day to int safely
+    
+    # Convert execution_day to int safely
+    exec_day_int = 1 
+    if execution_day:
+        try:
+            exec_day_int = int(execution_day)
+        except:
+            pass
+            
+    total_invested = 0
+    total_share = 0
+    invest_log = []
+    
+    # Logic for specific day
+    # Robust Logic: Invest on the first available trading day on or after the target day within the period
+    
+    last_invested_period = None # "2023-01" for monthly, "2023-W01" for weekly
+    
+    for idx, row in df.iterrows():
+        current_date = pd.to_datetime(row['日期'])
+        current_nav = row['单位净值']
+        
+        should_invest = False
+        current_period = None
+        
+        if frequency == '每周':
+            # ISO Year-Week (e.g., 2023-01)
+            year, week, _ = current_date.isocalendar()
+            current_period = f"{year}-{week:02d}"
+            
+            # Target weekday: 0=Mon ... 4=Fri
+            target_weekday = exec_day_int - 1
+            if target_weekday < 0: target_weekday = 0
+            if target_weekday > 4: target_weekday = 4
+            
+            # If we haven't invested this week yet
+            if current_period != last_invested_period:
+                # Check if today is on or after the target weekday
+                if current_date.weekday() >= target_weekday:
+                    should_invest = True
+            
+        elif frequency == '每月':
+            current_period = current_date.strftime("%Y-%m")
+            
+            # If we haven't invested this month yet
+            if current_period != last_invested_period:
+                # Check if today is on or after the target day
+                if current_date.day >= exec_day_int:
+                    should_invest = True
+            
+        if should_invest:
+            share = amount / current_nav
+            total_share += share
+            total_invested += amount
+            invest_log.append({
+                'date': row['日期'],
+                'nav': current_nav,
+                'accumulated_share': total_share,
+                'total_invested': total_invested,
+                'market_value': total_share * current_nav
+            })
+            last_invested_period = current_period
+            
+    if not invest_log:
+        # Fallback if strict day matching failed (e.g. only holidays matched)
+        return None
+
+    trend_values = [x['market_value'] for x in invest_log]
+    
+    final_nav = df.iloc[-1]['单位净值']
+    final_value = total_share * final_nav
+    yield_rate = (final_value - total_invested) / total_invested if total_invested > 0 else 0
+    
+    # Create dummy optimistic/pessimistic for chart visual effect (just +/- 10% on the trend)
+    optimistic_trend = [v * 1.1 for v in trend_values]
+    pessimistic_trend = [v * 0.9 for v in trend_values]
+    
+    return {
+        'neutral': {
+            'trend': trend_values,
+            'total_invested': total_invested,
+            'final_value': final_value,
+            'yield_rate': yield_rate
+        },
+        'optimistic': {'trend': optimistic_trend},
+        'pessimistic': {'trend': pessimistic_trend}
+    }
+
 def analyze_fund_locally(fund_code, fund_name=""):
     """
     Perform deep analysis using a local expert system (Rule-based).

@@ -105,7 +105,10 @@ if 'data_prefetched' not in st.session_state:
 
 # --- Sidebar Navigation ---
 st.sidebar.title("🚀 基金估值")
-page = st.sidebar.radio("导航", ["仪表盘", "股票行情", "基金查询 & 诊断", "持仓管理", "智能定投", "理财科普"])
+if 'main_nav' not in st.session_state:
+    st.session_state['main_nav'] = "仪表盘"
+
+page = st.sidebar.radio("导航", ["仪表盘", "股票行情", "基金查询 & 诊断", "持仓管理", "智能定投", "理财科普"], key="main_nav")
 
 if page == "股票行情":
     st.sidebar.markdown("---")
@@ -241,14 +244,87 @@ def show_dashboard_metrics():
     total_profit = total_market_value - total_cost
     profit_rate = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     col1.metric("总资产 (元)", f"{total_market_value:,.2f}")
     col2.metric("累计收益 (元)", f"{total_profit:+,.2f}", f"{profit_rate:+.2f}%", delta_color="inverse")
     col3.metric("当日预估收益", f"{day_profit:+,.2f}", delta_color="inverse")
     
-    # Market Index
+    st.divider()
+    
+    # Market Indices
+    st.caption("🌍 全球市场指数")
+    m1, m2, m3, m4 = st.columns(4)
+    
+    # 1. HS300 (China)
     index_data = data_api.get_market_index()
-    col4.metric(index_data.get('名称', '沪深300'), f"{index_data.get('最新价', 0)}", f"{index_data.get('涨跌幅', 0)}%", delta_color="inverse")
+    m1.metric(index_data.get('名称', '沪深300'), f"{index_data.get('最新价', 0)}", f"{index_data.get('涨跌幅', 0)}%", delta_color="inverse")
+    
+    # 2. Global Indices (US)
+    global_indices = data_api.get_global_indices()
+    
+    # Helper to find index by name part
+    def get_idx(name_part):
+        return next((x for x in global_indices if name_part in x['name']), None)
+
+    sp500 = get_idx('标普')
+    dow = get_idx('道琼斯')
+    nasdaq = get_idx('纳斯达克')
+
+    if sp500:
+        m2.metric(sp500['name'], f"{sp500['price']:,.2f}", f"{sp500['pct']:+.2f}%", delta_color="inverse")
+    else:
+        m2.metric("标普500", "加载中...", "--")
+
+    if dow:
+        m3.metric(dow['name'], f"{dow['price']:,.2f}", f"{dow['pct']:+.2f}%", delta_color="inverse")
+    else:
+        m3.metric("道琼斯", "加载中...", "--")
+
+    if nasdaq:
+        m4.metric(nasdaq['name'], f"{nasdaq['price']:,.2f}", f"{nasdaq['pct']:+.2f}%", delta_color="inverse")
+    else:
+        m4.metric("纳斯达克", "加载中...", "--")
+
+    # --- User Selected Indices/Stocks ---
+    user_indices = database.get_user_indices()
+    if not user_indices.empty:
+        st.caption("📌 自选行情")
+        
+        # Grid layout for user indices
+        # We process them in chunks of 4 to keep the layout clean
+        u_rows = [user_indices.iloc[i:i+4] for i in range(0, len(user_indices), 4)]
+        
+        for chunk in u_rows:
+            u_cols = st.columns(4)
+            for idx, (_, row) in enumerate(chunk.iterrows()):
+                with u_cols[idx]:
+                    # Fetch real-time data
+                    full_code = row['symbol']
+                    detail = data_api.get_stock_realtime_detail(full_code)
+                    
+                    # Prepare stock info for navigation
+                    stock_info = {
+                        'name': row['name'],
+                        'value': full_code,
+                        'symbol': full_code[2:] if len(full_code) > 2 else full_code,
+                        'market': full_code[:2] if len(full_code) > 2 else ''
+                    }
+
+                    if detail:
+                        st.metric(
+                            detail['name'], 
+                            f"{detail['price']}", 
+                            f"{detail['pct_change']:+.2f}%", 
+                            delta_color="inverse"
+                        )
+                        stock_info['name'] = detail['name']
+                    else:
+                        st.metric(row['name'], "--", "--")
+                    
+                    if st.button("🔎 查看详情", key=f"view_{full_code}", use_container_width=True):
+                        st.session_state['stock_code_to_analyze'] = stock_info
+                        st.session_state['main_nav'] = "股票行情"
+                        st.rerun()
     
     # Show last update time inside the fragment so user knows it refreshed
     st.caption(f"数据更新时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
@@ -672,6 +748,25 @@ def render_stock_analysis():
     symbol = stock_code_to_analyze['symbol']
     market = stock_code_to_analyze['market']
     name = stock_code_to_analyze['name']
+
+    # --- Dashboard Toggle Button ---
+    user_indices = database.get_user_indices()
+    is_in_dashboard = full_code in user_indices['symbol'].values if not user_indices.empty else False
+    
+    col_dash_btn, col_rest = st.columns([1, 5])
+    with col_dash_btn:
+        if is_in_dashboard:
+            if st.button("❌ 移出仪表盘", key=f"del_{full_code}", help="从首页仪表盘移除此股票/指数"):
+                database.remove_user_index(full_code)
+                st.success(f"已移除 {name}")
+                time.sleep(1)
+                st.rerun()
+        else:
+            if st.button("📌 添加到仪表盘", key=f"add_{full_code}", help="将此股票/指数固定到首页仪表盘"):
+                database.add_user_index(full_code, name, market)
+                st.success(f"已添加 {name}")
+                time.sleep(1)
+                st.rerun()
     
     run_interval = 3 if auto_refresh and logic.is_trading_time() else None
     
@@ -1224,17 +1319,37 @@ def render_plan():
             st.subheader("1. 设定参数")
             fund_code = st.text_input("定投基金代码", "110011")
             amount = st.number_input("每期定投金额", value=1000)
-            freq = st.selectbox("定投频率", ["每周", "每两周", "每月"])
+            
+            freq = st.selectbox("定投频率", ["每周", "每月"])
+            
+            execution_day = None
+            if freq == "每周":
+                day_map = {"周一": "1", "周二": "2", "周三": "3", "周四": "4", "周五": "5"}
+                selected_day = st.selectbox("选择扣款日", list(day_map.keys()))
+                execution_day = day_map[selected_day]
+            elif freq == "每月":
+                execution_day = str(st.number_input("选择每月扣款日 (1-28)", 1, 28, 1))
+            
             duration = st.slider("预计定投时长 (年)", 1, 10, 3)
             
             if st.button("开始测算"):
-                with st.spinner("正在回测历史数据..."):
-                    res = logic.project_investment_plan(fund_code, amount, 30, duration) # approx freq
-                    st.session_state['plan_result'] = res
+                with st.spinner("正在回测历史真实数据..."):
+                    # Use new calculation logic
+                    res = logic.calculate_sip_returns(fund_code, amount, freq, duration, execution_day)
+                    if res:
+                        st.session_state['plan_result'] = res
+                        st.session_state['plan_params'] = {
+                            'fund_code': fund_code,
+                            'amount': amount,
+                            'freq': freq,
+                            'execution_day': execution_day
+                        }
+                    else:
+                        st.error("获取基金数据失败或数据不足，无法测算。")
         
         with c2:
             st.subheader("2. 收益测算 (基于历史真实波动)")
-            st.caption("⚠️ 测算逻辑说明：系统提取该基金近3年历史净值，通过蒙特卡洛模型计算年化收益均值及标准差。乐观/悲观场景分别代表概率分布的 ±1 标准差。测算仅供参考，不代表未来表现。")
+            st.caption("⚠️ 测算逻辑说明：系统提取该基金历史净值，严格按照您设定的扣款日进行模拟买入。乐观/悲观场景分别代表标准趋势的 ±10% 波动。测算仅供参考，不代表未来表现。")
             if 'plan_result' in st.session_state and st.session_state['plan_result']:
                 res = st.session_state['plan_result']
                 
@@ -1242,28 +1357,57 @@ def render_plan():
                 fig = go.Figure()
                 
                 # Optimistic
-                fig.add_trace(go.Scatter(y=res['optimistic']['trend'], mode='lines', name='乐观 (前20%)', line=dict(color='#FF3333', dash='dash')))
+                fig.add_trace(go.Scatter(y=res['optimistic']['trend'], mode='lines', name='乐观 (预期+10%)', line=dict(color='#FF3333', dash='dash')))
                 # Neutral
-                fig.add_trace(go.Scatter(y=res['neutral']['trend'], mode='lines', name='中性 (平均)', line=dict(color='#FFD700')))
+                fig.add_trace(go.Scatter(y=res['neutral']['trend'], mode='lines', name='中性 (历史实测)', line=dict(color='#FFD700')))
                 # Pessimistic
-                fig.add_trace(go.Scatter(y=res['pessimistic']['trend'], mode='lines', name='悲观 (后20%)', line=dict(color='#00CC00', dash='dot')))
+                fig.add_trace(go.Scatter(y=res['pessimistic']['trend'], mode='lines', name='悲观 (预期-10%)', line=dict(color='#00CC00', dash='dot')))
                 # Invested Base
-                fig.add_trace(go.Scatter(y=[amount * (i+1) for i in range(len(res['neutral']['trend']))], mode='lines', name='本金投入', line=dict(color='#666666')))
+                # Re-calculate x-axis for invested base line
+                total_periods = len(res['neutral']['trend'])
+                step_amount = res['neutral']['total_invested'] / total_periods if total_periods > 0 else amount
+                fig.add_trace(go.Scatter(y=[step_amount * (i+1) for i in range(total_periods)], mode='lines', name='本金投入', line=dict(color='#666666')))
                 
-                fig.update_layout(title="定投收益模拟曲线", xaxis_title="期数 (月)", yaxis_title="资产总值", template='plotly_dark')
+                fig.update_layout(title="定投收益模拟曲线 (基于真实历史)", xaxis_title="期数", yaxis_title="资产总值", template='plotly_dark')
                 st.plotly_chart(fig, width='stretch')
                 
-                st.info(f"📊 **中性预期**: 坚持定投 {duration} 年，累计投入 {res['neutral']['total_invested']} 元，期末预计市值 **{res['neutral']['final_value']:.2f}** 元 (收益率 {res['neutral']['yield_rate']*100:.2f}%)")
+                st.info(f"📊 **历史实测**: 坚持定投 {duration} 年，累计投入 {res['neutral']['total_invested']:.0f} 元，期末持有市值 **{res['neutral']['final_value']:.2f}** 元 (收益率 {res['neutral']['yield_rate']*100:.2f}%)")
                 
                 if st.button("保存该计划"):
-                    database.add_plan(fund_code, "未命名基金", amount, freq, datetime.datetime.now().strftime("%Y-%m-%d"))
-                    st.success("计划已保存！")
+                    params = st.session_state.get('plan_params', {})
+                    # Try to fetch fund name
+                    try:
+                        info = data_api.get_fund_basic_info(params['fund_code'])
+                        f_name = info.get('name', '未命名基金')
+                    except:
+                        f_name = '未命名基金'
+                        
+                    database.add_plan(params['fund_code'], f_name, params['amount'], params['freq'], params['execution_day'], datetime.datetime.now().strftime("%Y-%m-%d"))
+                    st.success("计划已保存！请切换到“我的定投”查看。")
     
     with tab2:
+        st.subheader("📋 我的定投计划")
         plans = database.get_plans()
         if not plans.empty:
-            st.dataframe(plans)
-            # Action buttons would go here
+            for idx, row in plans.iterrows():
+                with st.container(border=True):
+                    c_info, c_act = st.columns([3, 1])
+                    with c_info:
+                        exec_day = row['execution_day']
+                        if row['frequency'] == '每周':
+                            try:
+                                day_str = f"周{['一','二','三','四','五'][int(exec_day)-1]}"
+                            except:
+                                day_str = "周一(默认)"
+                        else:
+                            day_str = f"每月{exec_day}日" if exec_day else "每月1日(默认)"
+                            
+                        st.markdown(f"**{row['fund_name']}** ({row['fund_code']})")
+                        st.caption(f"定投: {row['amount']}元 | 频率: {row['frequency']} ({day_str}) | 开始时间: {row['start_date']}")
+                    with c_act:
+                        if st.button("删除", key=f"del_plan_{row['id']}"):
+                            database.delete_plan(row['id'])
+                            st.rerun()
         else:
             st.info("暂无定投计划。")
 

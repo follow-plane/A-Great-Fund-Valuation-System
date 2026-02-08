@@ -241,6 +241,47 @@ def get_market_index():
     
     return {'最新价': 0.0, '涨跌幅': 0.0, '名称': '获取失败'}
 
+@st.cache_data(ttl=60)
+def get_global_indices():
+    """
+    Fetch global indices (S&P 500, Dow Jones, Nasdaq) from Sina.
+    """
+    indices = {
+        'int_dji': '道琼斯',
+        'int_nasdaq': '纳斯达克',
+        'int_sp500': '标普500'
+    }
+    
+    results = []
+    try:
+        codes = ",".join(indices.keys())
+        url = f"http://hq.sinajs.cn/list={codes}"
+        headers = {"Referer": "https://finance.sina.com.cn/"}
+        resp = requests.get(url, headers=headers, timeout=2.0)
+        
+        if resp.status_code == 200:
+            content = resp.text
+            # Format: var hq_str_int_dji="道琼斯,39087.38,90.99,0.23";
+            
+            for code, name in indices.items():
+                if f"var hq_str_{code}=" in content:
+                    try:
+                        line = content.split(f"var hq_str_{code}=\"")[1].split('";')[0]
+                        parts = line.split(',')
+                        if len(parts) >= 4:
+                            results.append({
+                                'name': name, # Use our fixed name or parts[0]
+                                'price': float(parts[1]),
+                                'change': float(parts[2]),
+                                'pct': float(parts[3])
+                            })
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"Error fetching global indices: {e}")
+        
+    return results
+
 # --- Stock Data API ---
 
 def search_stocks(keyword):
@@ -423,10 +464,29 @@ def get_stock_kline(symbol, market, period='101'):
 @st.cache_data(ttl=300) # Cache for 5 minutes
 def _fetch_financial_news():
     """
-    Fetch real-time financial news from Cailian Press (CLS) or Sina.
+    Fetch real-time financial news from EastMoney (with URLs) or Cailian Press (CLS).
     """
     try:
-        # 财联社快讯
+        # 1. Try EastMoney first (Has direct URLs)
+        df = ak.stock_info_global_em()
+        if not df.empty:
+            news_list = []
+            for _, row in df.head(15).iterrows():
+                title = row['标题']
+                url = row['链接']
+                news_list.append({
+                    'title': title,
+                    'time': str(row['发布时间']),
+                    'tag': '东方财富',
+                    'url': url
+                })
+            return news_list
+            
+    except Exception as e:
+        print(f"Error fetching EastMoney news: {e}")
+        
+    try:
+        # 2. Fallback to Cailian Press (CLS) - No direct URLs, use Search
         df = ak.stock_info_global_cls()
         if not df.empty:
             news_list = []
@@ -442,7 +502,8 @@ def _fetch_financial_news():
                 })
             return news_list
     except Exception as e:
-        print(f"Error fetching news: {e}")
+        print(f"Error fetching CLS news: {e}")
+        
     return []
 
 
@@ -542,6 +603,12 @@ def search_funds(keyword):
         })[['code', 'name', 'type']].head(20) # Limit to 20 results
             
     return pd.DataFrame()
+
+def get_fund_basic_info(fund_code):
+    """
+    Alias for get_fund_base_info to match app.py usage.
+    """
+    return get_fund_base_info(fund_code)
 
 def get_fund_nav_history(fund_code, start_date='2020-01-01', end_date=None):
     """

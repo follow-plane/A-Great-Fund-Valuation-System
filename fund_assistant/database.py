@@ -30,10 +30,17 @@ def init_db():
             fund_name TEXT,
             amount REAL NOT NULL,
             frequency TEXT NOT NULL,
+            execution_day TEXT,
             start_date TEXT,
             status TEXT DEFAULT 'active'
         )
     ''')
+    
+    # Attempt to add execution_day column if it doesn't exist (Migration for existing DB)
+    try:
+        c.execute('ALTER TABLE investment_plans ADD COLUMN execution_day TEXT')
+    except sqlite3.OperationalError:
+        pass # Column likely already exists
 
     # Knowledge/Favorites table
     c.execute('''
@@ -67,6 +74,15 @@ def init_db():
         )
     ''')
     
+    # User Indices table: Stores user-selected indices/stocks for the dashboard
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_indices (
+            symbol TEXT PRIMARY KEY,
+            name TEXT,
+            market TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -86,6 +102,27 @@ def save_setting(key, value):
     conn = get_connection()
     c = conn.cursor()
     c.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
+
+# --- User Indices Operations ---
+def get_user_indices():
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM user_indices", conn)
+    conn.close()
+    return df
+
+def add_user_index(symbol, name, market=''):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO user_indices (symbol, name, market) VALUES (?, ?, ?)', (symbol, name, market))
+    conn.commit()
+    conn.close()
+
+def remove_user_index(symbol):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('DELETE FROM user_indices WHERE symbol = ?', (symbol,))
     conn.commit()
     conn.close()
 
@@ -173,11 +210,11 @@ def update_holding(holding_id, share, cost_price):
     conn.close()
 
 # --- Investment Plan Operations ---
-def add_plan(fund_code, fund_name, amount, frequency, start_date):
+def add_plan(fund_code, fund_name, amount, frequency, execution_day, start_date):
     conn = get_connection()
     c = conn.cursor()
-    c.execute('INSERT INTO investment_plans (fund_code, fund_name, amount, frequency, start_date) VALUES (?, ?, ?, ?, ?)',
-              (fund_code, fund_name, amount, frequency, start_date))
+    c.execute('INSERT INTO investment_plans (fund_code, fund_name, amount, frequency, execution_day, start_date) VALUES (?, ?, ?, ?, ?, ?)',
+              (fund_code, fund_name, amount, frequency, execution_day, start_date))
     conn.commit()
     conn.close()
 
@@ -186,6 +223,13 @@ def get_plans():
     df = pd.read_sql('SELECT * FROM investment_plans', conn)
     conn.close()
     return df
+
+def delete_plan(plan_id):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('DELETE FROM investment_plans WHERE id = ?', (plan_id,))
+    conn.commit()
+    conn.close()
 
 def update_plan_status(plan_id, status):
     conn = get_connection()

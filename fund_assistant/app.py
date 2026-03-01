@@ -419,7 +419,7 @@ def show_dashboard_metrics():
             
             days_option = st.selectbox("查看天数", [7, 15, 30, 60, 90], index=2, key="fund_history_days")
             
-            perf_df = database.get_fund_daily_performance(fund_code, days=days_option)
+            perf_df = logic.get_fund_daily_performance_history(fund_code, days=days_option)
             
             if not perf_df.empty:
                 perf_df['date'] = pd.to_datetime(perf_df['date'])
@@ -461,7 +461,7 @@ def show_dashboard_metrics():
                     min_pct = perf_df['pct'].min()
                     st.metric("区间波动", f"{max_pct:+.2f}% ~ {min_pct:+.2f}%", delta_color="inverse")
             else:
-                st.info("暂无历史数据，数据将在每日刷新后自动累积。")
+                st.info("暂无足够的历史数据来生成图表。")
     
     # 5. Market News & Tips
     st.markdown("### � 市场动态 & 智能建议")
@@ -1159,20 +1159,7 @@ def render_holdings():
                 if ticks_to_save:
                     database.save_tick_batch(ticks_to_save)
                 
-                # Save daily performance for each fund
-                today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-                for idx, row in holdings.iterrows():
-                    fund_code = row['fund_code']
-                    fund_name = row['fund_name']
-                    est = data_api.get_real_time_estimate(fund_code, pre_fetched_data=batch_data.get(fund_code))
-                    if est and est.get('zzl') is not None:
-                        database.save_fund_daily_performance(
-                            fund_code, 
-                            fund_name, 
-                            today_str, 
-                            est['zzl'], 
-                            est['gz']
-                        )
+
             else:
                 st.info("🌙 当前非交易时段，自动刷新已暂停。")
                 # Use last known data if available
@@ -1456,7 +1443,7 @@ def render_plan():
             fund_code = st.text_input("定投基金代码", "110011")
             amount = st.number_input("每期定投金额", value=1000)
             
-            freq = st.selectbox("定投频率", ["每周", "每月"])
+            freq = st.selectbox("定投频率", ["每日", "每周", "每月"])
             
             execution_day = None
             if freq == "每周":
@@ -1530,7 +1517,9 @@ def render_plan():
                     c_info, c_act = st.columns([3, 1])
                     with c_info:
                         exec_day = row['execution_day']
-                        if row['frequency'] == '每周':
+                        if row['frequency'] == '每日':
+                            day_str = "每个交易日"
+                        elif row['frequency'] == '每周':
                             try:
                                 day_str = f"周{['一','二','三','四','五'][int(exec_day)-1]}"
                             except:

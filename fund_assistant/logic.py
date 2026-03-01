@@ -399,7 +399,7 @@ def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execut
     Args:
         fund_code: Fund code
         amount: Investment amount per period
-        frequency: '每周' or '每月'
+        frequency: '每日', '每周', or '每月'
         duration_years: How many years to look back
         execution_day: '1'-'5' for Week (Mon-Fri), '1'-'28' for Month
     """
@@ -417,8 +417,11 @@ def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execut
         
     df = df[df['日期'] >= start_date].sort_values('日期') # Ascending
     
-    # Convert execution_day to int safely
-    
+    # Calculate historical volatility for scenario analysis
+    daily_returns = df['单位净值'].pct_change().dropna()
+    # Annualized standard deviation (volatility). Use a floor for stability.
+    annual_std = max(daily_returns.std() * np.sqrt(252), 0.05)
+
     # Convert execution_day to int safely
     exec_day_int = 1 
     if execution_day:
@@ -443,7 +446,10 @@ def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execut
         should_invest = False
         current_period = None
         
-        if frequency == '每周':
+        if frequency == '每日':
+            should_invest = True
+
+        elif frequency == '每周':
             # ISO Year-Week (e.g., 2023-01)
             year, week, _ = current_date.isocalendar()
             current_period = f"{year}-{week:02d}"
@@ -479,7 +485,8 @@ def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execut
                 'total_invested': total_invested,
                 'market_value': total_share * current_nav
             })
-            last_invested_period = current_period
+            if frequency != '每日':
+                last_invested_period = current_period
             
     if not invest_log:
         # Fallback if strict day matching failed (e.g. only holidays matched)
@@ -491,9 +498,12 @@ def calculate_sip_returns(fund_code, amount, frequency, duration_years=3, execut
     final_value = total_share * final_nav
     yield_rate = (final_value - total_invested) / total_invested if total_invested > 0 else 0
     
-    # Create dummy optimistic/pessimistic for chart visual effect (just +/- 10% on the trend)
-    optimistic_trend = [v * 1.1 for v in trend_values]
-    pessimistic_trend = [v * 0.9 for v in trend_values]
+    # The total volatility over the period is scaled by sqrt of the duration.
+    volatility_factor = annual_std * np.sqrt(duration_years)
+
+    # Create optimistic/pessimistic scenarios based on historical volatility
+    optimistic_trend = [v * (1 + volatility_factor) for v in trend_values]
+    pessimistic_trend = [v * (1 - volatility_factor) for v in trend_values]
     
     return {
         'neutral': {
@@ -792,6 +802,34 @@ def get_effective_trading_date():
         while next_day.weekday() > 4: # Skip Sat/Sun
             next_day += datetime.timedelta(days=1)
         return next_day.strftime('%Y-%m-%d')
+
+def get_fund_daily_performance_history(fund_code, days):
+    """
+    Fetches full NAV history and calculates daily percentage change for chart.
+    """
+    # Fetch history for the period + a buffer for pct_change calculation
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=days + 5)).strftime("%Y-%m-%d")
+    df = get_fund_nav_history(fund_code, start_date=start_date)
+    
+    if df.empty or len(df) < 2:
+        return pd.DataFrame()
+        
+    # Standardize columns
+    if '净值日期' in df.columns:
+        df = df.rename(columns={'净值日期': 'date'})
+    
+    # Ensure date is datetime
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date', ascending=True)
+    
+    # Calculate percentage change
+    df['pct'] = df['单位净值'].pct_change() * 100
+    
+    # Clean up and select last N days
+    result_df = df[['date', 'pct']].dropna().tail(days)
+    
+    return result_df
+
 
 def calculate_new_cost(old_share, old_cost, trade_amount, trade_price, trade_type="buy"):
     """

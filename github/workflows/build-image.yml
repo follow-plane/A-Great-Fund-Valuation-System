@@ -1,29 +1,30 @@
-name: Build Docker Image
+name: Build and Push Streamlit Docker Image
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]  # 推送到 main 分支自动构建
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      packages: write
       contents: read
-      
+      packages: write  # 允许推送镜像到 GHCR
     steps:
-      - uses: actions/checkout@v4
+      - name: 拉取代码
+        uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # GitHub 自动生成的令牌，无需手动配置
 
-      - name: Build and push
+      - name: 构建并推送镜像
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          # 镜像标签：格式为 ghcr.io/用户名/项目名:latest
           tags: ghcr.io/${{ github.repository_owner }}/${{ github.repository }}:latest

@@ -2,6 +2,23 @@ import sqlite3
 import pandas as pd
 import os
 from datetime import datetime
+import time
+import logging
+
+logger = logging.getLogger('fund_assistant.database')
+_PERF_LOG_PATH_DB = os.path.join(os.path.dirname(__file__), 'perf_logs.csv')
+
+def _log_perf_db(func_name, tag, duration_ms):
+    try:
+        ts = datetime.now().isoformat()
+        with open(_PERF_LOG_PATH_DB, 'a', encoding='utf-8') as f:
+            f.write(f"{ts},database,{func_name},{tag},{duration_ms:.3f}\n")
+    except Exception:
+        pass
+    try:
+        logger.info(f"PERF {func_name} {tag} {duration_ms:.3f}ms")
+    except Exception:
+        pass
 
 # 固定数据库文件路径为“本文件所在目录”，避免从不同工作目录启动时读写到不同的 fund_data.db
 # 也支持通过环境变量覆盖，方便迁移/调试
@@ -123,7 +140,11 @@ def init_db():
     conn.close()
 
 def get_connection():
-    return sqlite3.connect(DB_FILE)
+    # Allow a longer timeout and multi-thread access for short-lived connections.
+    # Using `check_same_thread=False` makes connections usable across threads
+    # created by ThreadPoolExecutors; we still open/close per operation to keep
+    # transactions safe. Timeout increased to reduce 'database is locked' errors.
+    return sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
 
 # --- Settings Operations ---
 def get_setting(key, default=None):
@@ -310,8 +331,8 @@ def execute_investment_plans():
         
         # Check if plan should be executed today
         if _should_execute_plan(frequency, execution_day, start_date):
-            # Get current NAV
-            est = get_real_time_estimate(fund_code)
+            # Get current NAV (force fresh real-time fetch for execution accuracy)
+            est = get_real_time_estimate(fund_code, force_refresh=True)
             if est and 'gz' in est:
                 nav = float(est['gz'])
                 if nav > 0:
@@ -429,14 +450,21 @@ def clear_search_history():
 
 # --- Asset History Operations ---
 def save_asset_snapshot(date_str, total_market_value, total_cost, day_profit):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO asset_history (date, total_market_value, total_cost, day_profit)
-        VALUES (?, ?, ?, ?)
-    ''', (date_str, total_market_value, total_cost, day_profit))
-    conn.commit()
-    conn.close()
+    start = time.perf_counter()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO asset_history (date, total_market_value, total_cost, day_profit)
+            VALUES (?, ?, ?, ?)
+        ''', (date_str, total_market_value, total_cost, day_profit))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _log_perf_db('save_asset_snapshot', f'date={date_str}', (time.perf_counter()-start)*1000.0)
 
 def get_asset_history():
     conn = get_connection()
@@ -452,14 +480,21 @@ def save_fund_daily_performance(fund_code, date_str, nav, daily_growth, confirme
     """
     Save daily performance data for a fund.
     """
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO fund_daily_performance (fund_code, date, nav, daily_growth, confirmed_nav)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (fund_code, date_str, nav, daily_growth, confirmed_nav))
-    conn.commit()
-    conn.close()
+    start = time.perf_counter()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO fund_daily_performance (fund_code, date, nav, daily_growth, confirmed_nav)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (fund_code, date_str, nav, daily_growth, confirmed_nav))
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _log_perf_db('save_fund_daily_performance', f'fund={fund_code} date={date_str}', (time.perf_counter()-start)*1000.0)
 
 def save_fund_daily_batch(performance_data):
     """
@@ -469,14 +504,21 @@ def save_fund_daily_batch(performance_data):
     if not performance_data:
         return
         
-    conn = get_connection()
-    c = conn.cursor()
-    c.executemany('''
-        INSERT OR REPLACE INTO fund_daily_performance (fund_code, date, nav, daily_growth, confirmed_nav)
-        VALUES (?, ?, ?, ?, ?)
-    ''', performance_data)
-    conn.commit()
-    conn.close()
+    start = time.perf_counter()
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.executemany('''
+            INSERT OR REPLACE INTO fund_daily_performance (fund_code, date, nav, daily_growth, confirmed_nav)
+            VALUES (?, ?, ?, ?, ?)
+        ''', performance_data)
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _log_perf_db('save_fund_daily_batch', f'count={len(performance_data)}', (time.perf_counter()-start)*1000.0)
 
 def get_fund_daily_performance(fund_code, start_date=None, end_date=None):
     """

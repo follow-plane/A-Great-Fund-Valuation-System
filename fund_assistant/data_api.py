@@ -7,9 +7,33 @@ import requests
 import re
 import json
 import threading
+import time
+import logging
+import os
 
 # Global lock for akshare calls to prevent py_mini_racer (V8) crashes in multi-threaded environments
 ak_lock = threading.Lock()
+
+# In-memory short-term cache for combined real-time estimates to reduce duplicate network calls
+# Key: fund_code -> (timestamp, result_dict)
+_rt_cache = {}
+_RT_CACHE_TTL = 5  # seconds
+
+# Performance logging
+logger = logging.getLogger('fund_assistant.data_api')
+_PERF_LOG_PATH = os.path.join(os.path.dirname(__file__), 'perf_logs.csv')
+
+def _log_perf(func_name, tag, duration_ms):
+    try:
+        ts = datetime.datetime.now().isoformat()
+        with open(_PERF_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(f"{ts},data_api,{func_name},{tag},{duration_ms:.3f}\n")
+    except Exception:
+        pass
+    try:
+        logger.info(f"PERF {func_name} {tag} {duration_ms:.3f}ms")
+    except Exception:
+        pass
 
 def safe_ak_call(func, *args, **kwargs):
     """
@@ -161,7 +185,7 @@ def _fetch_single_fund_realtime(fund_code):
         
     return None
 
-def get_batch_realtime_estimates(fund_codes):
+def get_batch_realtime_estimates(fund_codes, force_refresh=False):
     """
     Fetch real-time estimates for multiple funds in parallel.
     Optimized: Reduced max workers to avoid overloading APIs
@@ -169,7 +193,42 @@ def get_batch_realtime_estimates(fund_codes):
     results = {}
     if not fund_codes:
         return results
+    start = time.perf_counter()
+    try:
+        # If not forcing refresh, try to use the cached bulk estimation (fast, ttl=60)
+        if not force_refresh:
+            try:
+                estimations = _fetch_realtime_estimations()
+                if estimations:
+                    for code in fund_codes:
+                        if code in estimations:
+                            results[code] = estimations[code]
+                    # For any missing codes, fall back to individual threaded fetch
+                    missing = [c for c in fund_codes if c not in results]
+                    if not missing:
+                        return results
+                    fund_codes = missing
+            except Exception:
+                # If cached bulk fetch failed, fall through to threaded fetch
+                pass
         
+        # Threaded individual fetch (used when force_refresh=True or missing from bulk cache)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_code = {executor.submit(_fetch_single_fund_realtime, code): code for code in fund_codes}
+            for future in concurrent.futures.as_completed(future_to_code):
+                code = future_to_code[future]
+                try:
+                    data = future.result()
+                    if data:
+                        results[code] = data
+                except Exception:
+                    pass
+        return results
+    finally:
+        dur = (time.perf_counter() - start) * 1000.0
+        _log_perf('get_batch_realtime_estimates', f'count={len(fund_codes)} force={force_refresh}', dur)
+
+    # Threaded individual fetch (used when force_refresh=True or missing from bulk cache)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_code = {executor.submit(_fetch_single_fund_realtime, code): code for code in fund_codes}
         for future in concurrent.futures.as_completed(future_to_code):
@@ -1030,11 +1089,19 @@ def get_batch_intraday_trends(fund_codes):
             results[code] = data
     return results
 
-def get_real_time_estimate(fund_code, pre_fetched_data=None):
+def get_real_time_estimate(fund_code, pre_fetched_data=None, force_refresh=False):
     """
     Get real-time estimated valuation.
     Strictly from network, no mock data.
     """
+    # Use a short in-memory cache to avoid duplicate work within a tiny window.
+    start = time.perf_counter()
+    now = time.time()
+    if not force_refresh:
+            cached = _rt_cache.get(fund_code)
+            if cached and now - cached[0] < _RT_CACHE_TTL:
+                _log_perf('get_real_time_estimate', f'cached', (time.perf_counter()-start)*1000.0)
+                return cached[1]
     # 1. Try DIRECT Fast API first (Most accurate and fast for single fund)
     est_data = pre_fetched_data if pre_fetched_data else _fetch_single_fund_realtime(fund_code)
     
@@ -1075,7 +1142,7 @@ def get_real_time_estimate(fund_code, pre_fetched_data=None):
             else:
                 zzl_val = float(zzl_raw)
                 
-            return {
+            result = {
                 'gz': round(gz_val, 4),
                 'zzl': round(zzl_val, 2),
                 'time': datetime.datetime.now().strftime("%H:%M:%S"),
@@ -1084,21 +1151,33 @@ def get_real_time_estimate(fund_code, pre_fetched_data=None):
                 'last_date': last_date,
                 'pre_close': float(est_data.get('pre_close', 0.0))
             }
+            try:
+                _rt_cache[fund_code] = (now, result)
+            except Exception:
+                pass
+            _log_perf('get_real_time_estimate', f'fund={fund_code} force={force_refresh}', (time.perf_counter()-start)*1000.0)
+            return result
         except (ValueError, TypeError):
             pass
 
     # Final Fallback - ONLY if network call failed or returned nothing
     # We return a clear "Data Unavailable" structure
-    return {
-        'gz': last_nav if last_nav else 0.0, 
-        'zzl': 0.00, 
-        'time': '数据暂不可用', 
+    result = {
+        'gz': last_nav if last_nav else 0.0,
+        'zzl': 0.00,
+        'time': '数据暂不可用',
         'data_date': last_date,
-        'last_nav': last_nav if last_nav else 0.0, 
+        'last_nav': last_nav if last_nav else 0.0,
         'last_date': last_date,
         'pre_close': last_nav if last_nav else 0.0,
         'is_error': True if last_nav is None else False
     }
+    try:
+        _rt_cache[fund_code] = (now, result)
+    except Exception:
+        pass
+    _log_perf('get_real_time_estimate', f'fund={fund_code} force={force_refresh}', (time.perf_counter()-start)*1000.0)
+    return result
 
 def get_portfolio_history(holdings, days=30):
     """

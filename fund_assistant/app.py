@@ -13,9 +13,14 @@ import logic
 # Setup auto investment scheduler
 try:
     import auto_investment
-    auto_investment.setup_schedule()
+    # NOTE: Do NOT start the scheduler on import inside Streamlit.
+    # Starting the scheduler here will spawn a background thread for every
+    # Streamlit session which can lead to excessive threads and duplicate executions.
+    # To run the scheduler, launch it as a separate process:
+    #   python -m fund_assistant.auto_investment
+    # or set up a system service / scheduled task.
 except Exception as e:
-    st.warning(f"自动定投功能初始化失败: {str(e)}")
+    st.warning(f"自动定投模块加载失败: {str(e)}")
 
 # --- Configuration & Setup ---
 st.set_page_config(
@@ -258,16 +263,18 @@ def show_dashboard_metrics():
         
         # Only fetch from network if not skipping
         if not skip_api:
-            batch_data = data_api.get_batch_realtime_estimates(holding_codes)
+            # If auto_refresh is enabled, force fresh real-time fetch; otherwise allow cached bulk estimates
+            batch_data = data_api.get_batch_realtime_estimates(holding_codes, force_refresh=auto_refresh)
             ticks_to_save = []
             
             total_market_value = 0.0
             total_cost = 0.0
             day_profit = 0.0
             
+            performance_batch = []
             for index, row in holdings.iterrows():
                 fund_code = row['fund_code']
-                est = data_api.get_real_time_estimate(fund_code, pre_fetched_data=batch_data.get(fund_code))
+                est = data_api.get_real_time_estimate(fund_code, pre_fetched_data=batch_data.get(fund_code), force_refresh=auto_refresh)
                 
                 current_nav = est['gz']
                 market_value = current_nav * row['share']
@@ -292,7 +299,7 @@ def show_dashboard_metrics():
                 nav = float(est['gz'])
                 daily_growth = float(est['zzl'])
                 confirmed_nav = float(est.get('confirmed_nav', est['gz']))
-                database.save_fund_daily_performance(fund_code, date_str, nav, daily_growth, confirmed_nav)
+                performance_batch.append((fund_code, date_str, nav, daily_growth, confirmed_nav))
             
             # Update session state with new data
             st.session_state['last_dashboard_data'] = {
@@ -301,6 +308,8 @@ def show_dashboard_metrics():
                 'day_profit': day_profit
             }
             
+            if performance_batch:
+                database.save_fund_daily_batch(performance_batch)
             if ticks_to_save:
                 database.save_tick_batch(ticks_to_save)
         else:
@@ -811,7 +820,7 @@ def render_search():
                     
                     # Realtime
                     st.divider()
-                    est = data_api.get_real_time_estimate(fund_code)
+                    est = data_api.get_real_time_estimate(fund_code, force_refresh=auto_refresh)
                     st.metric("实时估值", f"{est['gz']}", f"{est['zzl']}%", delta_color="inverse")
                     
                     # Fund Profile (Collapsible)
@@ -1272,7 +1281,7 @@ def render_holdings():
                 data_dates = ["--"] * len(holdings)
                 
                 # Batch fetch real-time data
-                batch_data = data_api.get_batch_realtime_estimates(holding_codes)
+                batch_data = data_api.get_batch_realtime_estimates(holding_codes, force_refresh=auto_refresh)
                 batch_trends = data_api.get_batch_intraday_trends(holding_codes)
 
                 if not auto_refresh:
@@ -1282,7 +1291,7 @@ def render_holdings():
                 
                 for i, row in holdings.iterrows():
                     fund_code = row['fund_code']
-                    est = data_api.get_real_time_estimate(fund_code, pre_fetched_data=batch_data.get(fund_code))
+                    est = data_api.get_real_time_estimate(fund_code, pre_fetched_data=batch_data.get(fund_code), force_refresh=auto_refresh)
                     
                     nav = est['gz']
                     mv = nav * row['share']

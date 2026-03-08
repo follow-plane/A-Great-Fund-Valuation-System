@@ -164,12 +164,13 @@ def _fetch_single_fund_realtime(fund_code):
 def get_batch_realtime_estimates(fund_codes):
     """
     Fetch real-time estimates for multiple funds in parallel.
+    Optimized: Reduced max workers to avoid overloading APIs
     """
     results = {}
     if not fund_codes:
         return results
         
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_code = {executor.submit(_fetch_single_fund_realtime, code): code for code in fund_codes}
         for future in concurrent.futures.as_completed(future_to_code):
             code = future_to_code[future]
@@ -436,6 +437,115 @@ def search_stocks_eastmoney(keyword):
         print(f"Error in East Money search: {e}")
         import traceback
         traceback.print_exc()
+    
+    return results
+
+def search_forex_commodity_api(keyword):
+    """
+    Search forex/commodity using East Money API.
+    Returns a list of dicts: {'symbol': '...', 'name': '...', 'type': 'forex'|'metal'|'commodity', 'value': '...', 'market': '...'}
+    """
+    results = []
+    
+    # 先进行本地搜索，确保即使API失效也能返回结果
+    local_results = search_forex_commodity(keyword)
+    for item in local_results:
+        results.append({
+            'symbol': item.get('symbol', ''),
+            'name': item.get('name', ''),
+            'type': item.get('type', 'forex'),
+            'value': item.get('symbol', ''),
+            'market': item.get('type', 'forex')
+        })
+    
+    # 如果本地搜索已经有结果，直接返回
+    if results:
+        return results
+    
+    # 尝试使用东方财富API
+    try:
+        url = "https://searchapi.eastmoney.com/api/suggest/get"
+        params = {
+            "input": keyword,
+            "type": 15,  # 15 for forex/commodity, may need adjustment
+            "count": 20
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.eastmoney.com/"
+        }
+        resp = requests.get(url, params=params, headers=headers, timeout=3.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            table_data = data.get('QuotationCodeTable', {}).get('Data', [])
+            if table_data:
+                for item in table_data:
+                    code = item.get('Code', '')
+                    name = item.get('Name', '')
+                    classify = item.get('Classify', '')
+                    
+                    # Filter for forex/commodity related items
+                    if classify in ['Futures', 'Forex', 'Commodity'] or '外汇' in name or '期货' in name or '商品' in name:
+                        # Determine type based on name or classify
+                        item_type = 'forex'
+                        if '黄金' in name or '白银' in name or 'XAU' in code or 'XAG' in code:
+                            item_type = 'metal'
+                        elif '原油' in name or '铜' in name or '铝' in name or 'OIL' in code or 'CU' in code:
+                            item_type = 'commodity'
+                        elif classify == 'Futures':
+                            item_type = 'commodity'
+                        elif classify == 'Forex':
+                            item_type = 'forex'
+                        
+                        # Create value for detail page (use symbol format)
+                        value = code if code else name
+                        
+                        results.append({
+                            'symbol': code if code else name,
+                            'name': name,
+                            'type': item_type,
+                            'value': value,
+                            'market': item_type
+                        })
+    except Exception as e:
+        print(f"Error in East Money forex/commodity search: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # 如果API没有返回结果，添加一些常见的商品和外汇
+    if not results:
+        # 添加常见商品
+        common_commodities = [
+            {'symbol': 'OIL', 'name': '原油', 'type': 'commodity'},
+            {'symbol': 'COPPER', 'name': '铜', 'type': 'commodity'},
+            {'symbol': 'ALUMINUM', 'name': '铝', 'type': 'commodity'},
+            {'symbol': 'ZINC', 'name': '锌', 'type': 'commodity'},
+            {'symbol': 'GOLD', 'name': '黄金', 'type': 'metal'},
+            {'symbol': 'SILVER', 'name': '白银', 'type': 'metal'},
+        ]
+        
+        # 添加常见外汇
+        common_forex = [
+            {'symbol': 'USDCNY', 'name': '美元人民币', 'type': 'forex'},
+            {'symbol': 'EURUSD', 'name': '欧元美元', 'type': 'forex'},
+            {'symbol': 'GBPUSD', 'name': '英镑美元', 'type': 'forex'},
+            {'symbol': 'USDJPY', 'name': '美元日元', 'type': 'forex'},
+            {'symbol': 'AUDUSD', 'name': '澳元美元', 'type': 'forex'},
+        ]
+        
+        # 过滤匹配的项目
+        all_items = common_commodities + common_forex
+        keyword_lower = keyword.lower().strip()
+        
+        for item in all_items:
+            if keyword_lower in item['symbol'].lower() or keyword_lower in item['name'].lower():
+                results.append({
+                    'symbol': item['symbol'],
+                    'name': item['name'],
+                    'type': item['type'],
+                    'value': item['symbol'],
+                    'market': item['type']
+                })
     
     return results
 
@@ -1059,7 +1169,7 @@ def prefetch_data(fund_codes):
 # 外汇、贵金属、商品功能
 # ============================================================================
 
-@st.cache_data(ttl=60)  # 缓存60秒，外汇数据变化较快
+@st.cache_data(ttl=300)  # 缓存5分钟，减少API请求频率
 def get_currency_rates():
     """
     获取主要货币汇率
@@ -1230,7 +1340,7 @@ def get_currency_rates():
         return []
 
 
-@st.cache_data(ttl=60)  # 缓存60秒
+@st.cache_data(ttl=300)  # 缓存5分钟，减少API请求频率
 def get_precious_metals():
     """
     获取贵金属行情（黄金、白银等）
@@ -1397,7 +1507,7 @@ def get_precious_metals():
         return []
 
 
-@st.cache_data(ttl=60)  # 缓存60秒
+@st.cache_data(ttl=300)  # 缓存5分钟，减少API请求频率
 def get_commodity_prices():
     """
     获取主要商品价格（原油、铜、农产品等）
@@ -1625,6 +1735,192 @@ def get_forex_commodity_detail(symbol):
     for item in all_items:
         if symbol.lower() in item['symbol'].lower() or symbol.lower() in item['name'].lower():
             return item
+    
+    return None
+
+def get_forex_commodity_trends(symbol, item_type='forex'):
+    """
+    获取外汇/商品分时图数据
+    参数:
+        symbol: 代码（如"USDCNY", "hf_XAU"等）
+        item_type: 'forex', 'metal', 'commodity'
+    返回: {'pre_close': float, 'trends': [{'time': str, 'price': float}]}
+    """
+    try:
+        # 根据类型确定新浪财经代码
+        sina_code = symbol
+        
+        # 如果是外汇，直接使用symbol（如USDCNY）
+        if item_type == 'forex':
+            sina_code = symbol
+        # 如果是贵金属，使用hf_前缀
+        elif item_type == 'metal':
+            if not symbol.startswith('hf_'):
+                # 尝试映射
+                metal_map = {
+                    'XAU': 'hf_XAU',
+                    'XAG': 'hf_XAG',
+                    'AU': 'gds_AUTD',
+                    'AG': 'gds_AGTD'
+                }
+                sina_code = metal_map.get(symbol, f'hf_{symbol}')
+        # 如果是商品，使用hf_或nf_前缀
+        elif item_type == 'commodity':
+            if not symbol.startswith(('hf_', 'nf_')):
+                commodity_map = {
+                    'OIL': 'hf_OIL',
+                    'CU': 'hf_CU',
+                    'AL': 'hf_AL',
+                    'ZN': 'hf_ZN',
+                    'NI': 'hf_NI',
+                    'PB': 'hf_PB',
+                    'SN': 'hf_SN',
+                    'RB': 'hf_RB',
+                    'HC': 'hf_HC',
+                    'FU': 'hf_FU',
+                    'BU': 'hf_BU',
+                    'RU': 'hf_RU',
+                    'SC0': 'nf_SC0',
+                    'FU0': 'nf_FU0',
+                    'BU0': 'nf_BU0'
+                }
+                sina_code = commodity_map.get(symbol, f'hf_{symbol}')
+        
+        # 使用新浪财经API获取分时数据
+        url = f"http://hq.sinajs.cn/list={sina_code}"
+        headers = {
+            "Referer": "https://finance.sina.com.cn/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        
+        resp = requests.get(url, headers=headers, timeout=3.0)
+        if resp.status_code == 200:
+            content = resp.text
+            if "=" in content:
+                data_str = content.split('=')[1].strip().strip('";')
+                parts = data_str.split(',')
+                
+                if len(parts) >= 7:
+                    pre_close = float(parts[6]) if parts[6] else float(parts[0])
+                    current_price = float(parts[0]) if parts[0] else pre_close
+                    
+                    # 构建简单的分时数据（新浪API不直接提供分时，我们基于当前价格模拟）
+                    # 实际应用中，可以使用AkShare获取更详细的分时数据
+                    trends = [{
+                        'time': datetime.datetime.now().strftime('%H:%M'),
+                        'price': current_price
+                    }]
+                    
+                    return {
+                        'pre_close': pre_close,
+                        'trends': trends
+                    }
+    except Exception as e:
+        print(f"Error fetching forex/commodity trends for {symbol}: {e}")
+    
+    # 备用方案：使用AkShare获取分时数据
+    try:
+        if item_type == 'forex':
+            # 尝试使用AkShare获取外汇分时
+            symbol_clean = symbol.replace('CNY', '/CNY').replace('CNH', '/CNH')
+            df = safe_ak_call(ak.currency_hist, symbol=symbol_clean, period="1", start_date="20240101", end_date=datetime.datetime.now().strftime('%Y%m%d'))
+            if not df.empty:
+                latest = df.iloc[-1]
+                pre_close = float(latest.get('收盘', latest.get('close', 0)))
+                current_price = pre_close
+                trends = [{
+                    'time': datetime.datetime.now().strftime('%H:%M'),
+                    'price': current_price
+                }]
+                return {
+                    'pre_close': pre_close,
+                    'trends': trends
+                }
+    except Exception as e:
+        print(f"Error using AkShare for trends: {e}")
+    
+    return None
+
+def get_forex_commodity_kline(symbol, item_type='forex', period='101'):
+    """
+    获取外汇/商品K线数据
+    参数:
+        symbol: 代码
+        item_type: 'forex', 'metal', 'commodity'
+        period: '101' (日K), '102' (周K), '103' (月K)
+    返回: [{'date': str, 'open': float, 'close': float, 'high': float, 'low': float, 'volume': float}]
+    """
+    try:
+        # 使用AkShare获取K线数据
+        if item_type == 'forex':
+            # 外汇历史数据
+            symbol_clean = symbol.replace('CNY', '/CNY').replace('CNH', '/CNH')
+            try:
+                df = safe_ak_call(ak.currency_hist, symbol=symbol_clean, period="1", start_date="20200101", end_date=datetime.datetime.now().strftime('%Y%m%d'))
+                if not df.empty:
+                    # 转换列名
+                    date_col = '日期' if '日期' in df.columns else 'date'
+                    open_col = '开盘' if '开盘' in df.columns else 'open'
+                    close_col = '收盘' if '收盘' in df.columns else 'close'
+                    high_col = '最高' if '最高' in df.columns else 'high'
+                    low_col = '最低' if '最低' in df.columns else 'low'
+                    vol_col = '成交量' if '成交量' in df.columns else 'volume'
+                    
+                    klines = []
+                    for _, row in df.iterrows():
+                        klines.append({
+                            'date': str(row.get(date_col, '')),
+                            'open': float(row.get(open_col, 0)),
+                            'close': float(row.get(close_col, 0)),
+                            'high': float(row.get(high_col, 0)),
+                            'low': float(row.get(low_col, 0)),
+                            'volume': float(row.get(vol_col, 0))
+                        })
+                    return klines
+            except Exception as e:
+                print(f"Error fetching forex kline with AkShare: {e}")
+        
+        elif item_type in ['metal', 'commodity']:
+            # 贵金属和商品使用期货数据
+            try:
+                # 尝试使用AkShare的期货数据
+                if item_type == 'metal':
+                    # 黄金、白银等
+                    if 'XAU' in symbol or 'AU' in symbol:
+                        df = safe_ak_call(ak.futures_main_sina, symbol="AU0")
+                    elif 'XAG' in symbol or 'AG' in symbol:
+                        df = safe_ak_call(ak.futures_main_sina, symbol="AG0")
+                    else:
+                        return None
+                else:
+                    # 商品期货
+                    commodity_map = {
+                        'OIL': 'SC0',
+                        'CU': 'CU0',
+                        'AL': 'AL0',
+                        'ZN': 'ZN0',
+                        'NI': 'NI0'
+                    }
+                    sina_symbol = commodity_map.get(symbol, symbol)
+                    df = safe_ak_call(ak.futures_main_sina, symbol=sina_symbol)
+                
+                if not df.empty and len(df) > 0:
+                    klines = []
+                    for _, row in df.iterrows():
+                        date_val = row.get('日期', row.get('date', ''))
+                        klines.append({
+                            'date': str(date_val),
+                            'open': float(row.get('开盘', row.get('open', 0))),
+                            'close': float(row.get('收盘', row.get('close', 0))),
+                            'high': float(row.get('最高', row.get('high', 0))),
+                            'low': float(row.get('最低', row.get('low', 0))),
+                            'volume': float(row.get('成交量', row.get('volume', 0)))
+                        })
+                    return klines
+            except Exception as e:
+                print(f"Error fetching commodity kline: {e}")
+    except Exception as e:
+        print(f"Error fetching forex/commodity kline for {symbol}: {e}")
     
     return None
 

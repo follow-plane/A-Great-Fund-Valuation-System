@@ -3,7 +3,10 @@ import pandas as pd
 import os
 from datetime import datetime
 
-DB_FILE = 'fund_data.db'
+# 固定数据库文件路径为“本文件所在目录”，避免从不同工作目录启动时读写到不同的 fund_data.db
+# 也支持通过环境变量覆盖，方便迁移/调试
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.environ.get("FUND_ASSISTANT_DB_FILE", os.path.join(_BASE_DIR, "fund_data.db"))
 
 def init_db():
     """Initialize the database with necessary tables."""

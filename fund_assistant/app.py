@@ -97,22 +97,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- Data Prefetching (Fast Load, Light Version) ---
-# 说明：首屏仅为前 5 只持仓做历史数据预取，避免持仓过多时首屏长时间卡住。
+# --- Data Prefetching (Lazy Loading) ---
+# 说明：数据只在需要时加载，避免首屏长时间卡住
 if 'data_prefetched' not in st.session_state:
-    with st.spinner('🚀 正在连接交易所数据专线，加载核心持仓历史行情...'):
-        # 1. Get all user holdings
-        holdings = database.get_holdings()
-        holding_codes = holdings['fund_code'].tolist() if not holdings.empty else []
-
-        # 2. 仅对前若干只持仓做历史预取，避免大规模网络请求拖慢首页加载
-        MAX_PREFETCH_FUNDS = 5
-        codes_to_prefetch = holding_codes[:MAX_PREFETCH_FUNDS]
-        if codes_to_prefetch:
-            data_api.prefetch_data(codes_to_prefetch)
-
-        # 3. Mark as done
-        st.session_state['data_prefetched'] = True
+    st.session_state['data_prefetched'] = False
 
 # --- Sidebar Navigation ---
 st.sidebar.title("🚀 基金估值系统")
@@ -124,19 +112,78 @@ page = st.sidebar.radio("导航", ["仪表盘", "股票行情", "基金查询 & 
 if page == "股票行情":
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 股票搜索")
-    stock_query = st.sidebar.text_input("输入股票代码/名称", placeholder="例如: 600519")
-    if stock_query:
-        stocks_list = data_api.search_stocks(stock_query)
+    if 'stock_query' not in st.session_state:
+        st.session_state['stock_query'] = ""
+    if 'stock_search_triggered' not in st.session_state:
+        st.session_state['stock_search_triggered'] = False
+    
+    stock_query_input = st.sidebar.text_input("输入股票代码/名称", placeholder="例如: 600519", value=st.session_state['stock_query'])
+    
+    col_search, col_clear = st.sidebar.columns([1, 1])
+    with col_search:
+        search_clicked = st.button("🔍 搜索", key="search_stock_btn")
+    with col_clear:
+        clear_clicked = st.button("🗑️ 清除", key="clear_stock_btn")
+    
+    if clear_clicked:
+        st.session_state['stock_query'] = ""
+        st.session_state['stock_search_triggered'] = False
+        if 'stock_code_to_analyze' in st.session_state:
+            del st.session_state['stock_code_to_analyze']
+        st.rerun()
+    
+    if search_clicked:
+        st.session_state['stock_query'] = stock_query_input
+        st.session_state['stock_search_triggered'] = True
+    
+    if st.session_state['stock_search_triggered'] and st.session_state['stock_query']:
+        stocks_list = data_api.search_stocks(st.session_state['stock_query'])
         if stocks_list:
             stocks = pd.DataFrame(stocks_list)
             stock_options = stocks.apply(lambda x: f"{x['name']} ({x['value']})", axis=1).tolist()
-            selected_stock_str = st.sidebar.selectbox("选择股票", options=stock_options)
+            selected_stock_str = st.sidebar.selectbox("选择股票", options=stock_options, key="selected_stock")
             if selected_stock_str:
                 # Find the record
                 selected_stock = stocks[stocks.apply(lambda x: f"{x['name']} ({x['value']})" == selected_stock_str, axis=1)].iloc[0]
                 st.session_state['stock_code_to_analyze'] = selected_stock.to_dict()
         else:
             st.sidebar.warning("⚠️ 未找到相关股票，请尝试其他关键词")
+
+if page == "外汇与商品":
+    # 暂时移除搜索功能（API 有反爬限制）
+    # st.sidebar.markdown("---")
+    # st.sidebar.subheader("🔍 外汇/商品搜索")
+    # 初始化搜索框的 session state
+    # if 'forex_query' not in st.session_state:
+    #     st.session_state['forex_query'] = ""
+    # forex_query = st.sidebar.text_input("输入外汇/商品代码/名称", placeholder="例如: USDCNY, 黄金", value=st.session_state['forex_query'])
+    # 更新 session state
+    # st.session_state['forex_query'] = forex_query
+    # if forex_query:
+    #     forex_list = data_api.search_forex_commodity_api(forex_query)
+    #     if forex_list:
+    #         forex_df = pd.DataFrame(forex_list)
+    #         forex_options = forex_df.apply(lambda x: f"{x['name']} ({x['symbol']})", axis=1).tolist()
+    #         selected_forex_str = st.sidebar.selectbox("选择品种", options=forex_options)
+    #         if selected_forex_str:
+    #             # Find the record
+    #             selected_forex = forex_df[forex_df.apply(lambda x: f"{x['name']} ({x['symbol']})" == selected_forex_str, axis=1)].iloc[0]
+    #             st.session_state['selected_forex_item'] = {
+    #                 'symbol': selected_forex['symbol'],
+    #                 'name': selected_forex['name'],
+    #                 'type': selected_forex['type'],
+    #                 'value': selected_forex.get('value', selected_forex['symbol']),
+    #                 'market': selected_forex.get('market', selected_forex['type'])
+    #             }
+    #     else:
+    #         st.sidebar.warning("⚠️ 未找到相关外汇/商品，请尝试其他关键词")
+    pass
+else:
+    # 当不在外汇与商品页面时，清除搜索状态
+    if 'forex_query' in st.session_state:
+        del st.session_state['forex_query']
+    if 'selected_forex_item' in st.session_state:
+        del st.session_state['selected_forex_item']
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🤖 AI 配置 (DeepSeek)")
@@ -329,31 +376,60 @@ def show_dashboard_metrics():
                 with u_cols[idx]:
                     # Fetch real-time data
                     full_code = row['symbol']
-                    detail = data_api.get_stock_realtime_detail(full_code)
+                    market = row.get('market', '')
                     
-                    # Prepare stock info for navigation
-                    stock_info = {
-                        'name': row['name'],
-                        'value': full_code,
-                        'symbol': full_code[2:] if len(full_code) > 2 else full_code,
-                        'market': full_code[:2] if len(full_code) > 2 else ''
-                    }
-
-                    if detail:
-                        st.metric(
-                            detail['name'], 
-                            f"{detail['price']}", 
-                            f"{detail['pct_change']:+.2f}%", 
-                            delta_color="inverse"
-                        )
-                        stock_info['name'] = detail['name']
+                    # 判断是外汇/商品还是股票
+                    if full_code.startswith('fx_'):
+                        # 外汇/商品
+                        symbol = full_code[3:]  # 去掉 'fx_' 前缀
+                        detail_data = data_api.get_forex_commodity_detail(symbol)
+                        
+                        if detail_data:
+                            st.metric(
+                                detail_data.get('name', row['name']), 
+                                f"{detail_data.get('price', 0):.4f}", 
+                                f"{detail_data.get('pct', 0):+.3f}%", 
+                                delta_color="inverse"
+                            )
+                        else:
+                            st.metric(row['name'], "--", "--")
+                        
+                        if st.button("🔎 查看详情", key=f"view_{full_code}", use_container_width=True):
+                            st.session_state['selected_forex_item'] = {
+                                'symbol': symbol,
+                                'name': row['name'],
+                                'type': market if market else 'forex',
+                                'data': detail_data
+                            }
+                            st.session_state['main_nav'] = "外汇与商品"
+                            st.rerun()
                     else:
-                        st.metric(row['name'], "--", "--")
-                    
-                    if st.button("🔎 查看详情", key=f"view_{full_code}", use_container_width=True):
-                        st.session_state['stock_code_to_analyze'] = stock_info
-                        st.session_state['main_nav'] = "股票行情"
-                        st.rerun()
+                        # 股票
+                        detail = data_api.get_stock_realtime_detail(full_code)
+                        
+                        # Prepare stock info for navigation
+                        stock_info = {
+                            'name': row['name'],
+                            'value': full_code,
+                            'symbol': full_code[2:] if len(full_code) > 2 else full_code,
+                            'market': full_code[:2] if len(full_code) > 2 else ''
+                        }
+
+                        if detail:
+                            st.metric(
+                                detail['name'], 
+                                f"{detail['price']}", 
+                                f"{detail['pct_change']:+.2f}%", 
+                                delta_color="inverse"
+                            )
+                            stock_info['name'] = detail['name']
+                        else:
+                            st.metric(row['name'], "--", "--")
+                        
+                        if st.button("🔎 查看详情", key=f"view_{full_code}", use_container_width=True):
+                            st.session_state['stock_code_to_analyze'] = stock_info
+                            st.session_state['main_nav'] = "股票行情"
+                            st.rerun()
     
     # Show last update time inside the fragment so user knows it refreshed
     st.caption(f"数据更新时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
@@ -468,6 +544,13 @@ def show_dashboard_metrics():
                 end_date=str(end_date)
             )
 
+            # 如果当前选择的日期范围内没有数据，尝试回退到“全部历史”，避免有数据却不显示的情况
+            if perf_df.empty:
+                full_perf_df = database.get_fund_daily_performance(fund_code)
+                if not full_perf_df.empty:
+                    perf_df = full_perf_df
+                    st.info("当前选择的日期范围内暂无该基金的历史记录，已自动展示该基金的全部可用历史数据。")
+
             if not perf_df.empty:
                 # Convert date to datetime
                 perf_df['date'] = pd.to_datetime(perf_df['date'])
@@ -543,7 +626,7 @@ def show_dashboard_metrics():
                         'date', 'nav', 'daily_growth', 'cumulative_return'
                     ]], use_container_width=True)
             else:
-                st.info(f"该基金在所选日期范围内暂无历史数据。")
+                st.info("该基金当前暂无任何历史涨跌数据，请先在持仓中持有一段时间以积累记录。")
     else:
         st.info("暂无基金历史涨跌数据。请先添加基金到持仓并等待数据收集。")
     # 5. Market News & Tips
@@ -1106,7 +1189,7 @@ def render_stock_analysis():
                             fixedrange=False
                         )
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"stock_kline_{period_code}")
                 else:
                     st.info("暂无K线数据")
 
@@ -1658,11 +1741,30 @@ def render_knowledge():
 def render_forex_commodity():
     """
     渲染外汇与商品页面
-    - 当左侧开启“实时刷新 (1秒级)”时，本页面也会按 1 秒自动刷新行情。
+    - 支持搜索功能（侧边栏）
+    - 支持查看详情（分时图、K线图）
+    - 支持添加到仪表盘
+    - 当左侧开启"实时刷新 (1秒级)"时，本页面也会按 1 秒自动刷新行情。
     """
     st.title("💱 外汇与商品")
     st.caption("全球市场实时行情，数据来源于新浪财经")
+    
+    # 初始化session state
+    if 'selected_forex_item' not in st.session_state:
+        st.session_state['selected_forex_item'] = None
+    
+    # 显示详情或默认行情列表
+    selected_item = st.session_state.get('selected_forex_item')
+    
+    if selected_item:
+        # 显示详情页面
+        render_forex_commodity_detail(selected_item)
+    else:
+        # 显示默认行情列表
+        render_forex_commodity_default()
 
+def render_forex_commodity_default():
+    """显示默认的外汇/商品行情列表"""
     # 根据侧边栏的 auto_refresh 开关动态设置刷新间隔
     run_interval = 1 if auto_refresh else None
 
@@ -1689,6 +1791,14 @@ def render_forex_commodity():
                     for i, rate in enumerate(currency_rates[:8]):
                         col_idx = i % 4
                         with fx_cols[col_idx]:
+                            if st.button(f"📊 {rate['name']}", key=f"fx_{rate['symbol']}", use_container_width=True):
+                                st.session_state['selected_forex_item'] = {
+                                    'symbol': rate['symbol'],
+                                    'name': rate['name'],
+                                    'type': 'forex',
+                                    'data': rate
+                                }
+                                st.rerun()
                             st.metric(
                                 f"{rate['name']} ({rate['symbol']})",
                                 f"{rate['price']:.4f}",
@@ -1707,6 +1817,14 @@ def render_forex_commodity():
                     for i, metal in enumerate(precious_metals[:4]):
                         col_idx = i % 4
                         with metal_cols[col_idx]:
+                            if st.button(f"📊 {metal['name']}", key=f"metal_{metal['symbol']}", use_container_width=True):
+                                st.session_state['selected_forex_item'] = {
+                                    'symbol': metal.get('symbol', ''),
+                                    'name': metal['name'],
+                                    'type': 'metal',
+                                    'data': metal
+                                }
+                                st.rerun()
                             st.metric(
                                 metal['name'],
                                 f"{metal['price']:.2f}" if metal['price'] < 1000 else f"{metal['price']:,.0f}",
@@ -1725,6 +1843,14 @@ def render_forex_commodity():
                     for i, commodity in enumerate(commodities[:8]):
                         col_idx = i % 4
                         with commodity_cols[col_idx]:
+                            if st.button(f"📊 {commodity['name']}", key=f"commodity_{commodity['symbol']}", use_container_width=True):
+                                st.session_state['selected_forex_item'] = {
+                                    'symbol': commodity.get('symbol', ''),
+                                    'name': commodity['name'],
+                                    'type': 'commodity',
+                                    'data': commodity
+                                }
+                                st.rerun()
                             st.metric(
                                 f"{commodity['name']}",
                                 f"{commodity['price']:.2f}" if commodity['price'] < 1000 else f"{commodity['price']:,.0f}",
@@ -1748,6 +1874,179 @@ def render_forex_commodity():
                 st.rerun()
 
     _forex_commodity_fragment()
+
+# render_forex_commodity_search_results() function removed - search is now handled in sidebar
+
+def render_forex_commodity_detail(item):
+    """显示外汇/商品详情页面（分时图、K线图等）"""
+    import data_api
+    
+    symbol = item['symbol']
+    name = item['name']
+    item_type = item.get('type', 'forex')
+    
+    # 返回按钮
+    if st.button("← 返回", key="forex_detail_return"):
+        # 清除所有相关状态，返回到默认行情列表
+        if 'selected_forex_item' in st.session_state:
+            del st.session_state['selected_forex_item']
+        # 清除侧边栏搜索相关的状态
+        if 'forex_search_query' in st.session_state:
+            del st.session_state['forex_search_query']
+        # 清除侧边栏搜索框的值
+        if 'forex_query' in st.session_state:
+            del st.session_state['forex_query']
+        st.rerun()
+    
+    st.markdown(f"## {name} ({symbol})")
+    
+    # 添加到仪表盘按钮
+    user_indices = database.get_user_indices()
+    full_code = f"fx_{symbol}"
+    is_in_dashboard = full_code in user_indices['symbol'].values if not user_indices.empty else False
+    
+    col_dash_btn, col_rest = st.columns([1, 5])
+    with col_dash_btn:
+        if is_in_dashboard:
+            if st.button("❌ 移出仪表盘", key=f"del_detail_{full_code}"):
+                database.remove_user_index(full_code)
+                st.success(f"已移除 {name}")
+                time.sleep(1)
+                st.rerun()
+        else:
+            if st.button("📌 添加到仪表盘", key=f"add_detail_{full_code}"):
+                database.add_user_index(full_code, name, item_type)
+                st.success(f"已添加 {name}")
+                time.sleep(1)
+                st.rerun()
+    
+    # 根据侧边栏的 auto_refresh 开关动态设置刷新间隔
+    run_interval = 1 if auto_refresh else None
+    
+    @st.fragment(run_every=run_interval)
+    def _detail_fragment():
+        # 获取实时数据
+        detail_data = item.get('data')
+        if not detail_data:
+            detail_data = data_api.get_forex_commodity_detail(symbol)
+        
+        if detail_data:
+            # 显示基本信息
+            h_col1, h_col2, h_col3 = st.columns([2, 3, 2])
+            
+            color = '#FF3333' if detail_data.get('pct', 0) >= 0 else '#00CC00'
+            arrow = '↑' if detail_data.get('pct', 0) >= 0 else '↓'
+            
+            with h_col1:
+                st.markdown(f"## {name}")
+                st.caption(f"{symbol}")
+            
+            with h_col2:
+                price = detail_data.get('price', 0)
+                pct = detail_data.get('pct', 0)
+                st.markdown(f"""
+                <div style="display: flex; align-items: baseline;">
+                    <span style="font-size: 3em; font-weight: bold; color: {color};">{price:.4f}</span>
+                    <span style="font-size: 1.5em; margin-left: 15px; color: {color};">{arrow} {pct:+.3f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with h_col3:
+                st.caption(f"更新时间: {datetime.datetime.now().strftime('%H:%M:%S')}")
+            
+            st.divider()
+            
+            # 显示指标
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("开盘", f"{detail_data.get('open', 0):.4f}")
+            m2.metric("最高", f"{detail_data.get('high', 0):.4f}")
+            m3.metric("最低", f"{detail_data.get('low', 0):.4f}")
+            m4.metric("昨收", f"{detail_data.get('pre_close', 0):.4f}")
+        
+        # 图表区域
+        st.markdown("### 📊 走势图")
+        chart_tabs = st.tabs(["分时走势", "日K线", "周K线", "月K线"])
+        
+        with chart_tabs[0]:
+            # 分时图
+            with st.spinner("加载分时数据..."):
+                trends_data = data_api.get_forex_commodity_trends(symbol, item_type)
+                if trends_data and trends_data.get('trends'):
+                    df_trends = pd.DataFrame(trends_data['trends'])
+                    pre_close = trends_data.get('pre_close', 0)
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=df_trends['time'],
+                        y=df_trends['price'],
+                        mode='lines+markers',
+                        name='价格',
+                        line=dict(color='#FFFFFF', width=2),
+                        fill='tozeroy',
+                        fillcolor='rgba(255, 255, 255, 0.1)'
+                    ))
+                    
+                    if pre_close > 0:
+                        fig.add_hline(y=pre_close, line_dash="dash", line_color="gray", annotation_text="昨收")
+                    
+                    fig.update_layout(
+                        template='plotly_dark',
+                        height=450,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=True, gridcolor='#333'),
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key="forex_trend_chart")
+                else:
+                    st.info("暂无分时数据")
+        
+        def plot_kline(period_code, period_name):
+            k_data = data_api.get_forex_commodity_kline(symbol, item_type, period_code)
+            if k_data:
+                df_k = pd.DataFrame(k_data)
+                
+                fig = go.Figure(data=[go.Candlestick(
+                    x=df_k['date'],
+                    open=df_k['open'],
+                    high=df_k['high'],
+                    low=df_k['low'],
+                    close=df_k['close'],
+                    increasing_line_color='#FF3333',
+                    decreasing_line_color='#00CC00',
+                    name='K线'
+                )])
+                
+                # 添加均线
+                if len(df_k) >= 5:
+                    df_k['MA5'] = df_k['close'].rolling(window=5).mean()
+                    df_k['MA10'] = df_k['close'].rolling(window=10).mean()
+                    df_k['MA20'] = df_k['close'].rolling(window=20).mean()
+                    
+                    fig.add_trace(go.Scatter(x=df_k['date'], y=df_k['MA5'], mode='lines', name='MA5', line=dict(color='white', width=1)))
+                    fig.add_trace(go.Scatter(x=df_k['date'], y=df_k['MA10'], mode='lines', name='MA10', line=dict(color='yellow', width=1)))
+                    if len(df_k) >= 20:
+                        fig.add_trace(go.Scatter(x=df_k['date'], y=df_k['MA20'], mode='lines', name='MA20', line=dict(color='magenta', width=1)))
+                
+                fig.update_layout(
+                    template='plotly_dark',
+                    xaxis_rangeslider_visible=False,
+                    height=450,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig, use_container_width=True, key=f"forex_kline_{period_code}")
+            else:
+                st.info(f"暂无{period_name}K线数据")
+        
+        with chart_tabs[1]:
+            plot_kline('101', '日')
+        with chart_tabs[2]:
+            plot_kline('102', '周')
+        with chart_tabs[3]:
+            plot_kline('103', '月')
+    
+    _detail_fragment()
 
 # --- Main Routing ---
 if page == "仪表盘":
